@@ -54,6 +54,10 @@
   }
   header h1 { margin: 0 0 4px; font-size: 22px; }
   header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .titleRow { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .siteLinks { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .siteLinks a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+  .siteLinks a:hover { color: var(--accent); }
   #storageWarn { margin-top: 4px; color: var(--warn-text); font-size: 12px; }
   main {
     max-width: 1200px;
@@ -190,7 +194,13 @@
 <body>
 <header>
   <div>
-    <h1>launchd plist generator</h1>
+    <div class="titleRow">
+      <h1>launchd plist generator</h1>
+      <nav class="siteLinks">
+        <a href="https://github.com/shimabox/launchd-plist-generator">GitHub</a> ·
+        <a href="https://x.com/shimabox">X (@shimabox)</a>
+      </nav>
+    </div>
     <p>フォームに入力すると、右側に plist と登録コマンドが即時生成されます。入力内容はこのブラウザに自動保存されます。</p>
     <p id="storageWarn" role="alert" hidden>⚠ このブラウザでは入力内容を保存できません。ページを再読み込みすると入力が消えます。</p>
   </div>
@@ -324,10 +334,6 @@
     <a href="https://github.com/shimabox/launchd-plist-generator/blob/main/docs/guide.md">実用ガイド</a> ·
     <a href="https://github.com/shimabox/launchd-plist-generator/blob/main/docs/reference.md">リファレンス</a> ·
     <a href="https://github.com/shimabox/launchd-plist-generator/blob/main/docs/use-cases.md">ユースケース集</a>
-  </span>
-  <span>
-    <a href="https://github.com/shimabox/launchd-plist-generator">GitHub</a> ·
-    <a href="https://x.com/shimabox">X (@shimabox)</a>
   </span>
 </footer>
 
