@@ -236,6 +236,27 @@ test('doctor: 実行ファイルが存在しない plist はエラーとして�
   }
 });
 
+test('doctor: 読み取り権限のない plist は生の plutil エラーではなく guide.md リンク付きメッセージを出力する', () => {
+  if (process.platform !== 'darwin') return;
+  // root で実行されていると chmod 000 でも読み取れてしまい検証にならないためスキップする。
+  if (process.getuid && process.getuid() === 0) return;
+  const plist = writeTmpPlist(GOOD_PLIST.replace('__ERR_LOG__', '/tmp/does-not-matter.log'));
+  try {
+    fs.chmodSync(plist, 0o000);
+    const r = runCli(['doctor', plist]);
+    assert.strictEqual(r.status, 1);
+    // 生の plutil エラー ("couldn't be opened because you don't have permission" 等) や
+    // トップレベル catch のメッセージ ("エラー: plist を読み込めませんでした (plutil)") が
+    // 出力されず、diagnoseReadPermission() の整形メッセージだけが出力されることを確認する。
+    assert.ok(!r.stderr.includes('エラー: plist を読み込めませんでした'), r.stderr);
+    assert.ok(r.stdout.includes(`「${plist}」の読み取り権限がありません。`), r.stdout);
+    assert.ok(r.stdout.includes('docs/guide.md#83-'), r.stdout);
+  } finally {
+    fs.chmodSync(plist, 0o644);
+    fs.unlinkSync(plist);
+  }
+});
+
 test('check: バイナリ plist も読み込める', () => {
   if (process.platform !== 'darwin') return;
   const xmlPlist = writeTmpPlist(GOOD_PLIST.replace('__ERR_LOG__', '/tmp/does-not-matter.log'));

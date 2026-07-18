@@ -414,6 +414,21 @@ function runCheck(filePath) {
 }
 
 function runDoctor(filePath) {
+  // runCheck (→ readPlistAsDict → plutil) を呼ぶ前に、ファイル自体の読み取り権限を
+  // 確認する。読み取り権限がない場合、plutil はこの時点で例外を投げてしまい
+  // (「plist を読み込めませんでした (plutil): ... couldn't be opened because you
+  // don't have permission ...」という生のメッセージのみが main() のトップレベル
+  // catch から出力される)、diagnoseReadPermission() が用意しているガイド付きの
+  // 整形メッセージに到達できなくなる。そのため、ファイルが存在するのに読み取れない
+  // ケースだけ、plutil を呼ばずにここで早期リターンする。
+  // (ファイルが存在しないケースは isReadable も false になるが、そちらは従来通り
+  // runCheck 経由の plutil エラーメッセージに委ねる — 「見つかりません」系の
+  // メッセージが「権限がありません」に化けてしまわないようにするため。)
+  const preFileInfo = getFileInfo(filePath);
+  if (preFileInfo.exists && !preFileInfo.readable) {
+    return { config: null, issues: [diagnoseReadPermission(filePath, preFileInfo)], notes: [] };
+  }
+
   const base = runCheck(filePath);
   const config = base.config;
   const issues = [...base.issues];
