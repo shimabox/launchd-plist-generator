@@ -19,6 +19,7 @@ const {
   diagnoseExecutable,
   diagnoseDirectory,
   diagnosePlistLocation,
+  isLaunchDaemonPath,
   diagnoseReadPermission,
   diagnoseRegistration,
   parseLaunchctlPrint,
@@ -257,6 +258,23 @@ test('diagnosePlistLocation: 標準外なら info', () => {
   assert.strictEqual(r.level, 'info');
 });
 
+test('isLaunchDaemonPath: /Library/LaunchDaemons, /System/Library/LaunchDaemons 配下は true', () => {
+  assert.strictEqual(isLaunchDaemonPath('/Library/LaunchDaemons/com.example.job.plist'), true);
+  assert.strictEqual(isLaunchDaemonPath('/System/Library/LaunchDaemons/com.apple.foo.plist'), true);
+});
+
+test('isLaunchDaemonPath: LaunchAgents (per-user/system問わず) や標準外ディレクトリは false', () => {
+  assert.strictEqual(isLaunchDaemonPath('/Users/u/Library/LaunchAgents/com.example.job.plist'), false);
+  assert.strictEqual(isLaunchDaemonPath('/Library/LaunchAgents/com.example.job.plist'), false);
+  assert.strictEqual(isLaunchDaemonPath('/System/Library/LaunchAgents/com.apple.foo.plist'), false);
+  assert.strictEqual(isLaunchDaemonPath('/tmp/com.example.job.plist'), false);
+});
+
+test('isLaunchDaemonPath: 空/未指定は false', () => {
+  assert.strictEqual(isLaunchDaemonPath(''), false);
+  assert.strictEqual(isLaunchDaemonPath(null), false);
+});
+
 test('diagnoseReadPermission: 読み取り不可なら error、可能なら ok', () => {
   assert.strictEqual(diagnoseReadPermission('/tmp/x.plist', { readable: false }).level, 'error');
   assert.strictEqual(diagnoseReadPermission('/tmp/x.plist', { readable: true }).level, 'ok');
@@ -322,6 +340,39 @@ test('diagnoseRegistration: 未登録は ok', () => {
   assert.strictEqual(r.issues.length, 1);
   assert.strictEqual(r.issues[0].level, 'ok');
   assert.ok(r.issues[0].message.includes('登録されていません'));
+});
+
+test('diagnoseRegistration: isLaunchDaemon=true は printResult に関わらず「未登録」と断定せず info を返す', () => {
+  // クロスレビューで指摘されたバグの回帰テスト: LaunchDaemon 用ディレクトリの plist は
+  // gui ドメインへの照会結果 (printResult.registered=false) があっても「未登録」と断定してはならない。
+  const r = diagnoseRegistration({
+    label: 'com.example.daemon',
+    uid: 501,
+    plistPath: '/Library/LaunchDaemons/com.example.daemon.plist',
+    plistRealPath: '/Library/LaunchDaemons/com.example.daemon.plist',
+    printResult: { ok: true, registered: false, raw: '' },
+    isLaunchDaemon: true,
+  });
+  assert.strictEqual(r.issues.length, 1);
+  assert.strictEqual(r.issues[0].level, 'info');
+  assert.ok(!r.issues[0].message.includes('未登録'));
+  assert.ok(r.issues[0].message.includes('per-user の LaunchAgent (gui ドメイン) のみに対応しています'));
+  assert.ok(r.issues[0].message.includes('launchctl print system/com.example.daemon'));
+  assert.strictEqual(r.notes.length, 0);
+});
+
+test('diagnoseRegistration: isLaunchDaemon=true は printResult が null でも info を返す (launchctl print を呼ばない前提)', () => {
+  const r = diagnoseRegistration({
+    label: 'com.example.daemon',
+    uid: 501,
+    plistPath: '/System/Library/LaunchDaemons/com.example.daemon.plist',
+    plistRealPath: '/System/Library/LaunchDaemons/com.example.daemon.plist',
+    printResult: null,
+    isLaunchDaemon: true,
+  });
+  assert.strictEqual(r.issues.length, 1);
+  assert.strictEqual(r.issues[0].level, 'info');
+  assert.strictEqual(r.issues[0].field, 'registrationState');
 });
 
 test('diagnoseRegistration: 登録済み・パス一致・exit code 0 は ok のみ、bootout/bootstrap は notes に入る', () => {

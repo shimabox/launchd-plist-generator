@@ -145,19 +145,72 @@ test('doctor: 未登録の plist は実行ファイル・ディレクトリ・�
   }
 });
 
-test('doctor: 登録済みの実システム plist は登録状態と bootout/bootstrap コマンド例を出力する', () => {
+test('doctor: 登録済みの LaunchAgent は登録状態と bootout/bootstrap コマンド例を出力する', () => {
   if (process.platform !== 'darwin') return;
-  // launchctl list に必ず存在する Apple 標準の LaunchAgent を対象にする。
-  const label = 'com.apple.SafariHistoryServiceAgent';
-  const systemPlist = '/System/Volumes/Preboot/Cryptexes/App/System/Library/LaunchAgents/' + label + '.plist';
-  if (!fs.existsSync(systemPlist)) return; // 環境によって存在しない場合はスキップ
+  // 環境依存の既存システム plist に頼らず、テストが自分で使い捨ての LaunchAgent を
+  // gui ドメインに登録して確実に「登録済みケース」を検証する。
+  // CLI 本体 (bin/launchd-plist) は bootstrap/bootout を一切実行しない (読み取り専用のまま)。
+  const uid = process.getuid();
+  const label = `com.example.clitest-doctor-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const agentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
+  fs.mkdirSync(agentsDir, { recursive: true });
+  const plist = path.join(agentsDir, `${label}.plist`);
+  fs.writeFileSync(
+    plist,
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${label}</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/true</string></array>
+</dict>
+</plist>
+`
+  );
 
-  const r = runCli(['doctor', systemPlist]);
-  assert.ok(r.stdout.includes(label + ' は登録済みです') || r.stdout.includes('取得できませんでした'));
-  if (r.stdout.includes('登録済みです')) {
+  let bootstrapped = false;
+  try {
+    const bootstrap = spawnSync('/bin/launchctl', ['bootstrap', `gui/${uid}`, plist], { encoding: 'utf8' });
+    assert.strictEqual(bootstrap.status, 0, bootstrap.stderr);
+    bootstrapped = true;
+
+    const r = runCli(['doctor', plist]);
+    assert.ok(r.stdout.includes(label + ' は登録済みです'), r.stdout);
     assert.ok(r.stdout.includes('launchctl bootout'));
     assert.ok(r.stdout.includes('launchctl bootstrap'));
+  } finally {
+    if (bootstrapped) {
+      spawnSync('/bin/launchctl', ['bootout', `gui/${uid}/${label}`], { encoding: 'utf8' });
+    }
+    fs.unlinkSync(plist);
   }
+});
+
+test('doctor: LaunchDaemon 配下の plist は「未登録」と断定せず gui ドメイン非対応を案内する (参考)', () => {
+  if (process.platform !== 'darwin') return;
+  // 実システムの LaunchDaemon を読み取り専用で診断するだけの参考テスト。
+  // 個別のファイル名はOSバージョンによって存在しないことがあるため、
+  // /System/Library/LaunchDaemons 配下から読み取り可能な plist を1つ動的に選ぶ。
+  const daemonsDir = '/System/Library/LaunchDaemons';
+  if (!fs.existsSync(daemonsDir)) return;
+  const candidate = fs
+    .readdirSync(daemonsDir)
+    .find((f) => f.endsWith('.plist') && (() => {
+      try {
+        fs.accessSync(path.join(daemonsDir, f), fs.constants.R_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    })());
+  if (!candidate) return;
+  const daemonPlist = path.join(daemonsDir, candidate);
+
+  const r = runCli(['doctor', daemonPlist]);
+  // 「登録されていません (未登録)」という誤った断定をしていないことを確認する。
+  assert.ok(!r.stdout.includes('登録されていません'), r.stdout);
+  assert.ok(r.stdout.includes('per-user の LaunchAgent (gui ドメイン) のみに対応しています'), r.stdout);
 });
 
 test('doctor: 実行ファイルが存在しない plist はエラーとして報告される', () => {

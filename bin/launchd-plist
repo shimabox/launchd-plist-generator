@@ -197,6 +197,20 @@ function diagnoseDirectory(label, dirPath, dirInfo) {
   return { level: 'ok', message: `${label}「${dirPath}」は存在します。`, field: 'runtimeDirectory' };
 }
 
+// LaunchDaemon 用ディレクトリ (/Library/LaunchDaemons, /System/Library/LaunchDaemons) の一覧。
+// per-user の LaunchAgent (gui ドメイン) とは登録先の launchd ドメインが異なる
+// (LaunchDaemon は system ドメインに登録される) ため、登録状態の判定を分岐する際に使う。
+const LAUNCH_DAEMON_DIRS = ['/Library/LaunchDaemons', '/System/Library/LaunchDaemons'];
+
+// plist のパスが LaunchDaemon 用ディレクトリ配下かどうかを判定する。
+// LaunchDaemon は system ドメインに登録されるため、gui ドメイン限定の
+// launchctl print による登録状態チェックが適用できない対象を見分けるために使う。
+function isLaunchDaemonPath(plistPath) {
+  if (!plistPath) return false;
+  const dir = path.dirname(path.resolve(plistPath));
+  return LAUNCH_DAEMON_DIRS.some((d) => dir === path.resolve(d));
+}
+
 // plist の配置場所が標準ディレクトリ (~/Library/LaunchAgents 等) かどうかを判定する。
 function diagnosePlistLocation(plistPath, homeDir) {
   const standardDirs = [
@@ -244,12 +258,30 @@ function parseLaunchctlPrint(raw) {
 
 // 登録状態を判定する。printResult は getLaunchctlPrint() の戻り値 (I/O 層)。
 // 取得・パースに失敗しても静かに degrade し (info を1件返すだけ)、CLI をクラッシュさせない。
-function diagnoseRegistration({ label, uid, plistPath, plistRealPath, printResult }) {
+//
+// isLaunchDaemon が true の場合 (plist が /Library/LaunchDaemons や
+// /System/Library/LaunchDaemons 配下にある場合)、printResult の中身に関わらず判定を行わない。
+// LaunchDaemon は (per-user の LaunchAgent が登録される gui ドメインではなく) system ドメインに
+// 登録される可能性があり、gui ドメインへの照会結果だけで「未登録」と断定すると誤診断になるため。
+// system ドメインへの対応はスコープ外とし、info でその旨を案内するだけに留める。
+function diagnoseRegistration({ label, uid, plistPath, plistRealPath, printResult, isLaunchDaemon }) {
   const issues = [];
   const notes = [];
 
   if (!label) {
     issues.push({ level: 'info', message: 'Label が未設定のため、登録状態の確認をスキップしました。', field: 'registrationState' });
+    return { issues, notes };
+  }
+
+  if (isLaunchDaemon) {
+    issues.push({
+      level: 'info',
+      message:
+        `${label} は LaunchDaemon 用ディレクトリに配置されているため、登録状態の確認をスキップしました。` +
+        'このツールの登録状態チェックは per-user の LaunchAgent (gui ドメイン) のみに対応しています。' +
+        `LaunchDaemon の登録状態は \`launchctl print system/${label}\` などで別途確認してください。`,
+      field: 'registrationState',
+    });
     return { issues, notes };
   }
 
@@ -421,8 +453,12 @@ function runDoctor(filePath) {
   } catch {
     plistRealPath = null;
   }
-  const printResult = label && uid != null ? getLaunchctlPrint(label, uid) : null;
-  const reg = diagnoseRegistration({ label, uid, plistPath: filePath, plistRealPath, printResult });
+  // LaunchDaemon (system ドメイン想定) は gui ドメインへの照会では判定できないため、
+  // その場合は launchctl print 自体を呼ばず (誤った「未登録」判定を避けるため)、
+  // diagnoseRegistration 側で info を返させる。
+  const isLaunchDaemon = isLaunchDaemonPath(plistRealPath || filePath);
+  const printResult = !isLaunchDaemon && label && uid != null ? getLaunchctlPrint(label, uid) : null;
+  const reg = diagnoseRegistration({ label, uid, plistPath: filePath, plistRealPath, printResult, isLaunchDaemon });
   issues.push(...reg.issues);
   notes.push(...reg.notes);
 
@@ -546,6 +582,7 @@ if (typeof module !== 'undefined' && module.exports) {
     diagnoseExecutable,
     diagnoseDirectory,
     diagnosePlistLocation,
+    isLaunchDaemonPath,
     diagnoseReadPermission,
     diagnoseRegistration,
     parseLaunchctlPrint,
