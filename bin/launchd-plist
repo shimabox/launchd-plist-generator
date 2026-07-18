@@ -1,0 +1,565 @@
+#!/usr/bin/env node
+/*
+ * launchd-plist — 既存の launchd plist を診断する CLI。
+ *
+ * サブコマンド:
+ *   check <file.plist>   plist の内容を静的に検証する (plutil + generator.js の validate 相当)
+ *   doctor <file.plist>  check に加え、実行環境・launchd の登録状態を読み取り専用で診断する
+ *
+ * 生成機能 (フォーム相当) は持たない。既存の generator.js が持つ
+ * plistDictToConfig / validate (generatePlist 経由) を再利用する。
+ *
+ * DOM 非依存 (generator.js) と同様、このファイルも判定ロジックは純粋関数として
+ * module.exports で公開しつつ、require.main === module のときだけ CLI 本体
+ * (argv 処理・標準出力・process.exit) を実行する。child_process (plutil/launchctl)
+ * と fs へのアクセスは薄い I/O 層に閉じ込め、判定ロジックは引数として渡された
+ * データだけを見て動く純粋関数にする (単体テスト可能にするため)。
+ */
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { execFileSync } = require('child_process');
+
+const { generatePlist, plistDictToConfig } = require('../generator.js');
+
+/* ---------- guide.md へのリンク解決 (純粋関数) ---------- */
+
+const GUIDE_SECTION_HEADINGS = {
+  '4.1': '4.1 実行対象を指定するキー',
+  '4.2': '4.2 起動トリガーを指定するキー',
+  '4.3': '4.3 実行環境を指定するキー',
+  '8.1': '8.1 まず見るもの',
+  '8.2': '8.2 よくあるエラーと原因',
+  '8.3': '8.3 デバッグの定石',
+};
+
+// field → guide.md のセクション番号。
+// check (validate) 由来の issue は generator.js が使う field 名、
+// doctor 由来の issue はこのファイルで定義する field 名 (runtime*/registration*/plist*) を使う。
+const FIELD_TO_SECTION = {
+  // 4.1 実行対象を指定するキー
+  label: '4.1',
+  programArguments: '4.1',
+  workingDirectory: '4.1',
+  // 4.2 起動トリガーを指定するキー
+  trigger: '4.2',
+  calendar: '4.2',
+  startInterval: '4.2',
+  watchPaths: '4.2',
+  queueDirectories: '4.2',
+  keepAlive: '4.2',
+  // 4.3 実行環境を指定するキー
+  standardOutPath: '4.3',
+  standardErrorPath: '4.3',
+  environmentVariables: '4.3',
+  throttleInterval: '4.3',
+  // 8.2 よくあるエラーと原因 (doctor のランタイム系)
+  runtimeExecutable: '8.2',
+  runtimeDirectory: '8.2',
+  // 8.1 まず見るもの (doctor の登録状態・state 系)
+  registrationState: '8.1',
+  registrationPath: '8.1',
+  // 8.3 デバッグの定石 (上記いずれにも当てはまらない doctor issue のフォールバック)
+  plistLocation: '8.3',
+  plistPermission: '8.3',
+};
+
+// GitHub 標準のヘッダースラッグ規則 (小文字化・記号除去・空白→ハイフン) で
+// 見出しテキストからアンカーを生成する。
+// 例: '8.2 よくあるエラーと原因' → '82-よくあるエラーと原因'
+function githubSlug(heading) {
+  return heading
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\p{M}\s-]/gu, '')
+    .trim()
+    .replace(/\s+/g, '-');
+}
+
+// message の内容が field よりも優先されるルール
+// (プレースホルダ書き換え忘れ・exit 127 は field によらず 8.2 へ誘導する)
+function sectionForIssue(issue) {
+  const message = issue.message || '';
+  if (message.includes('USERNAME')) return '8.2';
+  if (message.includes('127')) return '8.2';
+  return FIELD_TO_SECTION[issue.field] || null;
+}
+
+// issue (または doctor issue) を guide.md の該当節へのリンクに解決する。
+// 解決できない場合 (ok/note、または未知の field) は null を返す。
+function resolveGuideLink(issue, guidePath) {
+  if (!issue || issue.level === 'ok' || issue.level === 'note') return null;
+  const section = sectionForIssue(issue);
+  if (!section) return null;
+  const heading = GUIDE_SECTION_HEADINGS[section];
+  const anchor = githubSlug(heading);
+  return { section, heading, anchor, url: `${guidePath || 'docs/guide.md'}#${anchor}` };
+}
+
+/* ---------- 出力の組み立て・終了コード計算 (純粋関数) ---------- */
+
+// issues ({level,message,field}[]) と notes (string[]) を、出力用の単一の配列に統合する。
+// notes は level: 'note' の要素として末尾に追加される (常に「参考」として表示するため)。
+function buildEntries(issues, notes) {
+  const noteEntries = (notes || []).map((n) => ({ level: 'note', message: n, field: null }));
+  return [...(issues || []), ...noteEntries];
+}
+
+// エラーが1件でもあれば1、エラーなし・警告のみなら0。--strict 指定時は警告が1件でもあれば1。
+function computeExitCode(entries, strict) {
+  const hasError = (entries || []).some((e) => e.level === 'error');
+  if (hasError) return 1;
+  if (strict && (entries || []).some((e) => e.level === 'warn')) return 1;
+  return 0;
+}
+
+const LEVEL_SYMBOLS = { ok: '✓', error: '✕', warn: '⚠', info: 'ℹ' };
+
+function formatHuman(entries, opts) {
+  const guidePath = (opts && opts.guidePath) || 'docs/guide.md';
+  const mainEntries = (entries || []).filter((e) => e.level !== 'note');
+  const noteEntries = (entries || []).filter((e) => e.level === 'note');
+  const lines = [];
+
+  if (mainEntries.length === 0) {
+    lines.push('✓ 問題は見つかりませんでした。');
+  } else {
+    for (const e of mainEntries) {
+      const symbol = LEVEL_SYMBOLS[e.level] || '・';
+      lines.push(`${symbol} ${e.message}`);
+      const link = resolveGuideLink(e, guidePath);
+      if (link) lines.push(`    → ${link.url}`);
+    }
+  }
+
+  if (noteEntries.length > 0) {
+    lines.push('');
+    lines.push('[参考]');
+    for (const e of noteEntries) lines.push(`・ ${e.message}`);
+  }
+
+  return lines.join('\n');
+}
+
+function formatJson(entries) {
+  return JSON.stringify(entries, null, 2);
+}
+
+/* ---------- doctor の判定ロジック (純粋関数。fs/child_process の結果を引数で受け取る) ---------- */
+
+function isAbsolutePathLike(p) {
+  return typeof p === 'string' && p.startsWith('/');
+}
+
+// argv[0] (実行ファイル) の存在・実行権限を判定する。
+// fileInfo は getFileInfo() の戻り値 (I/O 層)。argv0 が空/相対パスなら判定をスキップする。
+function diagnoseExecutable(argv0, fileInfo) {
+  if (!argv0) return null;
+  if (!isAbsolutePathLike(argv0)) {
+    return {
+      level: 'info',
+      message: `実行ファイル「${argv0}」は絶対パスではないため、存在確認をスキップしました (check の警告を参照してください)。`,
+      field: 'runtimeExecutable',
+    };
+  }
+  if (!fileInfo || !fileInfo.exists) {
+    return { level: 'error', message: `実行ファイル「${argv0}」が見つかりません。`, field: 'runtimeExecutable' };
+  }
+  if (!fileInfo.isFile) {
+    return { level: 'error', message: `「${argv0}」はファイルではありません (ディレクトリ等)。`, field: 'runtimeExecutable' };
+  }
+  if (!fileInfo.executable) {
+    return {
+      level: 'error',
+      message: `「${argv0}」に実行権限がありません。chmod +x で付与してください。`,
+      field: 'runtimeExecutable',
+    };
+  }
+  return { level: 'ok', message: `実行ファイル「${argv0}」は存在し、実行権限があります。`, field: 'runtimeExecutable' };
+}
+
+// ディレクトリ (WorkingDirectory やログ出力先の親ディレクトリ) の存在を判定する。
+function diagnoseDirectory(label, dirPath, dirInfo) {
+  if (!dirPath) return null;
+  if (!isAbsolutePathLike(dirPath)) {
+    return {
+      level: 'info',
+      message: `${label}「${dirPath}」は絶対パスではないため、存在確認をスキップしました。`,
+      field: 'runtimeDirectory',
+    };
+  }
+  if (!dirInfo || !dirInfo.exists) {
+    return { level: 'error', message: `${label}「${dirPath}」が存在しません。`, field: 'runtimeDirectory' };
+  }
+  if (!dirInfo.isDirectory) {
+    return { level: 'error', message: `${label}「${dirPath}」はディレクトリではありません。`, field: 'runtimeDirectory' };
+  }
+  return { level: 'ok', message: `${label}「${dirPath}」は存在します。`, field: 'runtimeDirectory' };
+}
+
+// plist の配置場所が標準ディレクトリ (~/Library/LaunchAgents 等) かどうかを判定する。
+function diagnosePlistLocation(plistPath, homeDir) {
+  const standardDirs = [
+    path.join(homeDir, 'Library', 'LaunchAgents'),
+    '/Library/LaunchAgents',
+    '/Library/LaunchDaemons',
+    '/System/Library/LaunchAgents',
+    '/System/Library/LaunchDaemons',
+  ];
+  const dir = path.dirname(path.resolve(plistPath));
+  const isStandard = standardDirs.some((d) => dir === path.resolve(d));
+  if (isStandard) {
+    return { level: 'ok', message: `plist は標準的な配置場所 (${dir}) にあります。`, field: 'plistLocation' };
+  }
+  return {
+    level: 'info',
+    message: `plist の配置場所 (${dir}) は標準的な LaunchAgents/LaunchDaemons ディレクトリではありません。動作に支障はありませんが、登録する際は配置場所も確認してください。`,
+    field: 'plistLocation',
+  };
+}
+
+// plist ファイル自体の読み取り権限を判定する。
+function diagnoseReadPermission(plistPath, fileInfo) {
+  if (!fileInfo || !fileInfo.readable) {
+    return { level: 'error', message: `「${plistPath}」の読み取り権限がありません。`, field: 'plistPermission' };
+  }
+  return { level: 'ok', message: `「${plistPath}」は読み取り可能です。`, field: 'plistPermission' };
+}
+
+// launchctl print の出力から path / state / last exit code の3項目だけを取り出す。
+// 対象行が1つも見つからなければ null を返す (パース失敗として扱う)。
+function parseLaunchctlPrint(raw) {
+  if (!raw) return null;
+  const extract = (key) => {
+    const re = new RegExp(`^[ \\t]*${key.replace(/ /g, '\\s+')}\\s*=\\s*(.+?)\\s*$`, 'm');
+    const m = raw.match(re);
+    return m ? m[1] : null;
+  };
+  const pathValue = extract('path');
+  const state = extract('state');
+  const lastExitCode = extract('last exit code');
+  if (pathValue === null && state === null && lastExitCode === null) return null;
+  return { path: pathValue, state, lastExitCode };
+}
+
+// 登録状態を判定する。printResult は getLaunchctlPrint() の戻り値 (I/O 層)。
+// 取得・パースに失敗しても静かに degrade し (info を1件返すだけ)、CLI をクラッシュさせない。
+function diagnoseRegistration({ label, uid, plistPath, plistRealPath, printResult }) {
+  const issues = [];
+  const notes = [];
+
+  if (!label) {
+    issues.push({ level: 'info', message: 'Label が未設定のため、登録状態の確認をスキップしました。', field: 'registrationState' });
+    return { issues, notes };
+  }
+
+  if (!printResult || !printResult.ok) {
+    issues.push({
+      level: 'info',
+      message: 'launchctl print による登録状態の取得に失敗しました (取得できませんでした)。',
+      field: 'registrationState',
+    });
+    return { issues, notes };
+  }
+
+  if (!printResult.registered) {
+    issues.push({ level: 'ok', message: `${label} は launchd に登録されていません (未登録)。`, field: 'registrationState' });
+    return { issues, notes };
+  }
+
+  const parsed = parseLaunchctlPrint(printResult.raw);
+  if (!parsed) {
+    issues.push({
+      level: 'info',
+      message: 'launchctl print の出力を解析できませんでした (取得できませんでした)。',
+      field: 'registrationState',
+    });
+    return { issues, notes };
+  }
+
+  issues.push({ level: 'ok', message: `${label} は登録済みです (state: ${parsed.state || '不明'})。`, field: 'registrationState' });
+
+  if (parsed.lastExitCode && parsed.lastExitCode !== '(never exited)') {
+    const code = parseInt(parsed.lastExitCode, 10);
+    if (Number.isInteger(code) && code !== 0) {
+      const hint = code === 127 ? ' (exit code 127 はコマンドが見つからないことが典型的な原因です)' : '';
+      issues.push({ level: 'warn', message: `最終終了コードが ${code} でした${hint}`, field: 'registrationState' });
+    }
+  }
+
+  if (parsed.path) {
+    const same = plistRealPath && path.resolve(parsed.path) === plistRealPath;
+    if (!same) {
+      issues.push({
+        level: 'warn',
+        message: `登録済みの plist パス (${parsed.path}) と指定ファイルの実パス (${plistRealPath || plistPath}) が一致しません。深い差分は確認していません。`,
+        field: 'registrationPath',
+      });
+    }
+  }
+
+  notes.push(
+    `${label} は登録済みです。plist の変更を反映するには一度登録を解除してから再登録してください (このコマンドは実行されません):\n` +
+      `    launchctl bootout gui/${uid}/${label}\n` +
+      `    launchctl bootstrap gui/${uid} ${plistPath}`
+  );
+
+  return { issues, notes };
+}
+
+/* ---------- I/O 層 (child_process / fs) ---------- */
+
+function getFileInfo(p) {
+  try {
+    const st = fs.statSync(p);
+    let executable = false;
+    let readable = false;
+    try {
+      fs.accessSync(p, fs.constants.X_OK);
+      executable = true;
+    } catch {
+      executable = false;
+    }
+    try {
+      fs.accessSync(p, fs.constants.R_OK);
+      readable = true;
+    } catch {
+      readable = false;
+    }
+    return { exists: true, isFile: st.isFile(), isDirectory: st.isDirectory(), executable, readable };
+  } catch {
+    return { exists: false, isFile: false, isDirectory: false, executable: false, readable: false };
+  }
+}
+
+// plutil -convert json -o - で plist (XML/バイナリ両対応) を読み込み、JS の dict にする。
+function readPlistAsDict(filePath) {
+  let raw;
+  try {
+    raw = execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', filePath], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    const stderr = e.stderr ? e.stderr.toString().trim() : '';
+    throw new Error(`plist を読み込めませんでした (plutil): ${stderr || e.message}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`plutil の出力を JSON として解析できませんでした: ${e.message}`);
+  }
+}
+
+// launchctl print gui/<uid>/<label> を実行する。未登録・取得失敗はここで吸収し、
+// 呼び出し元 (diagnoseRegistration) には ok/registered/raw の形で渡す。
+function getLaunchctlPrint(label, uid) {
+  try {
+    const out = execFileSync('/bin/launchctl', ['print', `gui/${uid}/${label}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { ok: true, registered: true, raw: out };
+  } catch (e) {
+    const stderr = e.stderr ? e.stderr.toString() : '';
+    if (/Could not find/i.test(stderr)) {
+      return { ok: true, registered: false, raw: '' };
+    }
+    return { ok: false, registered: false, raw: '' };
+  }
+}
+
+/* ---------- check / doctor の組み立て ---------- */
+
+function runCheck(filePath) {
+  const dict = readPlistAsDict(filePath);
+  if (typeof dict !== 'object' || dict === null || Array.isArray(dict)) {
+    throw new Error('plist のルートは dict である必要があります。');
+  }
+  const { config, notes } = plistDictToConfig(dict);
+  const { issues } = generatePlist(config);
+  return { config, issues, notes };
+}
+
+function runDoctor(filePath) {
+  const base = runCheck(filePath);
+  const config = base.config;
+  const issues = [...base.issues];
+  const notes = [...base.notes];
+
+  // 実行ファイル (argv[0])
+  const argv0 = (config.programArguments || [])[0] || '';
+  const argv0Info = isAbsolutePathLike(argv0) ? getFileInfo(argv0) : null;
+  const execIssue = diagnoseExecutable(argv0, argv0Info);
+  if (execIssue) issues.push(execIssue);
+
+  // WorkingDirectory
+  const wdInfo = isAbsolutePathLike(config.workingDirectory) ? getFileInfo(config.workingDirectory) : null;
+  const wdIssue = diagnoseDirectory('作業ディレクトリ (WorkingDirectory)', config.workingDirectory, wdInfo);
+  if (wdIssue) issues.push(wdIssue);
+
+  // ログ出力先の親ディレクトリ
+  for (const [labelText, logPath] of [
+    ['標準出力ログの出力先ディレクトリ (StandardOutPath)', config.standardOutPath],
+    ['標準エラーログの出力先ディレクトリ (StandardErrorPath)', config.standardErrorPath],
+  ]) {
+    if (!logPath) continue;
+    if (!isAbsolutePathLike(logPath)) {
+      issues.push(diagnoseDirectory(labelText, logPath, null));
+      continue;
+    }
+    const dir = path.dirname(logPath);
+    issues.push(diagnoseDirectory(labelText, dir, getFileInfo(dir)));
+  }
+
+  // launchd への登録状態
+  const label = config.label;
+  const uid = process.getuid ? process.getuid() : null;
+  let plistRealPath = null;
+  try {
+    plistRealPath = fs.realpathSync(filePath);
+  } catch {
+    plistRealPath = null;
+  }
+  const printResult = label && uid != null ? getLaunchctlPrint(label, uid) : null;
+  const reg = diagnoseRegistration({ label, uid, plistPath: filePath, plistRealPath, printResult });
+  issues.push(...reg.issues);
+  notes.push(...reg.notes);
+
+  // 配置場所・読み取り権限
+  issues.push(diagnosePlistLocation(plistRealPath || path.resolve(filePath), os.homedir()));
+  issues.push(diagnoseReadPermission(filePath, getFileInfo(filePath)));
+
+  return { config, issues, notes };
+}
+
+/* ---------- argv 処理 ---------- */
+
+function parseArgv(argv) {
+  const result = { command: null, file: null, json: false, strict: false, help: false, unknown: [] };
+  const rest = [];
+  for (const a of argv || []) {
+    if (a === '--help' || a === '-h') result.help = true;
+    else if (a === '--json') result.json = true;
+    else if (a === '--strict') result.strict = true;
+    else rest.push(a);
+  }
+  if (rest.length === 0) return result;
+  const [command, ...others] = rest;
+  result.command = command;
+  result.file = others.find((o) => !o.startsWith('-')) || null;
+  result.unknown = others.filter((o) => o.startsWith('-'));
+  return result;
+}
+
+function usageText() {
+  return [
+    '使い方: launchd-plist <check|doctor> <file.plist> [--json] [--strict]',
+    '',
+    'サブコマンド:',
+    '  check <file.plist>   plist の内容を静的に検証します',
+    '  doctor <file.plist>  check に加え、実行環境・launchd の登録状態も診断します (macOS 限定)',
+    '',
+    'オプション:',
+    '  --json      結果を JSON 配列として出力します',
+    '  --strict    警告のみでも exit code を 1 にします (CI 向け)',
+    '  --help, -h  このヘルプを表示します',
+    '',
+    '終了コード: エラーが1件でもあれば1、警告のみなら0 (--strict 指定時は警告も1)',
+  ].join('\n');
+}
+
+/* ---------- CLI 本体 ---------- */
+
+function main(argv) {
+  const opts = parseArgv(argv);
+
+  if (opts.help) {
+    console.log(usageText());
+    process.exit(0);
+    return;
+  }
+
+  if (!opts.command) {
+    console.error(usageText());
+    process.exit(1);
+    return;
+  }
+
+  if (opts.command !== 'check' && opts.command !== 'doctor') {
+    console.error(`不明なサブコマンドです: ${opts.command}\n`);
+    console.error(usageText());
+    process.exit(1);
+    return;
+  }
+
+  if (!opts.file) {
+    console.error('plist ファイルを指定してください。\n');
+    console.error(usageText());
+    process.exit(1);
+    return;
+  }
+
+  if (process.platform !== 'darwin') {
+    const need = opts.command === 'doctor' ? 'plutil と launchctl' : 'plutil';
+    console.error(
+      `launchd-plist の ${opts.command} は macOS の ${need} コマンドを利用するため、macOS 上でのみ実行できます。`
+    );
+    process.exit(1);
+    return;
+  }
+
+  let result;
+  try {
+    result = opts.command === 'check' ? runCheck(opts.file) : runDoctor(opts.file);
+  } catch (e) {
+    console.error(`エラー: ${e.message}`);
+    process.exit(1);
+    return;
+  }
+
+  const entries = buildEntries(result.issues, result.notes);
+
+  if (opts.json) {
+    console.log(formatJson(entries));
+  } else {
+    console.log(formatHuman(entries, { guidePath: 'docs/guide.md' }));
+  }
+
+  process.exit(computeExitCode(entries, opts.strict));
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    // argv・usage
+    parseArgv,
+    usageText,
+    // guide.md リンク解決
+    githubSlug,
+    resolveGuideLink,
+    // 出力組み立て・終了コード
+    buildEntries,
+    computeExitCode,
+    formatHuman,
+    formatJson,
+    // doctor の判定ロジック (純粋関数)
+    diagnoseExecutable,
+    diagnoseDirectory,
+    diagnosePlistLocation,
+    diagnoseReadPermission,
+    diagnoseRegistration,
+    parseLaunchctlPrint,
+    // I/O 層
+    getFileInfo,
+    readPlistAsDict,
+    getLaunchctlPrint,
+    // 組み立て・CLI 本体
+    runCheck,
+    runDoctor,
+    main,
+  };
+}
+
+if (require.main === module) {
+  main(process.argv.slice(2));
+}
