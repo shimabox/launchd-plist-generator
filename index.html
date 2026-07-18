@@ -127,14 +127,6 @@
   .issue-warn  { background: var(--warn-bg);  color: var(--warn-text);  border-color: var(--warn-border); }
   .issue-info  { background: var(--info-bg);  color: var(--info-text);  border-color: var(--info-border); }
   .issue-ok    { background: var(--info-bg);  color: var(--info-text);  border-color: var(--info-border); }
-  .issues li.linked { cursor: pointer; }
-  .issues li.linked:hover { text-decoration: underline; text-underline-offset: 2px; }
-  .issues li.linked::after { content: " → 該当欄へ"; opacity: .65; font-size: 11px; white-space: nowrap; }
-
-  /* エラー・警告のある入力欄のハイライト */
-  .field-error { border-color: var(--error-text) !important; outline: 1px solid var(--error-text); outline-offset: -1px; }
-  .field-warn  { border-color: var(--warn-text) !important; }
-  .field-flash { transition: box-shadow .2s; box-shadow: 0 0 0 4px var(--info-border); }
 
   .outblock { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px 16px; margin-bottom: 16px; }
   .outblock h2 { margin: 0 0 4px; font-size: 14px; }
@@ -189,7 +181,7 @@
       <input type="text" id="wd" placeholder="/Users/username/project">
     </fieldset>
 
-    <fieldset id="triggerSet">
+    <fieldset>
       <legend>いつ実行するか(トリガー)</legend>
 
       <label class="field">決まった時刻に(StartCalendarInterval)</label>
@@ -359,40 +351,9 @@
   }
 
   /* ---- 出力更新 ---- */
-  // 検証結果の field 名 → 対応する入力欄の id
-  const FIELD_TARGETS = {
-    label: 'label',
-    programArguments: 'args',
-    workingDirectory: 'wd',
-    standardOutPath: 'stdout',
-    standardErrorPath: 'stderr',
-    watchPaths: 'watch',
-    queueDirectories: 'queue',
-    environmentVariables: 'env',
-    calendar: 'calRows',
-    startInterval: 'interval',
-    keepAlive: 'keepAlive',
-    throttleInterval: 'throttle',
-    trigger: 'triggerSet',
-  };
-
-  function jumpToField(el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    if (typeof el.focus === 'function' && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) {
-      el.focus({ preventScroll: true });
-    }
-    el.classList.add('field-flash');
-    setTimeout(() => el.classList.remove('field-flash'), 800);
-  }
-
   let current = null;
   function update() {
     current = generatePlist(readConfig());
-
-    // 前回のハイライトをクリアしてから付け直す
-    for (const el of document.querySelectorAll('.field-error, .field-warn')) {
-      el.classList.remove('field-error', 'field-warn');
-    }
 
     const ul = $('issues');
     ul.innerHTML = '';
@@ -407,18 +368,6 @@
       const li = document.createElement('li');
       li.className = 'issue-' + issue.level;
       li.textContent = `${badge[issue.level]}: ${issue.message}`;
-
-      const target = FIELD_TARGETS[issue.field] && document.getElementById(FIELD_TARGETS[issue.field]);
-      if (target) {
-        li.classList.add('linked');
-        li.title = 'クリックすると該当の入力欄に移動します';
-        li.addEventListener('click', () => jumpToField(target));
-        if (issue.level === 'error') {
-          target.classList.add('field-error');
-        } else if (issue.level === 'warn' && !target.classList.contains('field-error')) {
-          target.classList.add('field-warn');
-        }
-      }
       ul.appendChild(li);
     }
 
