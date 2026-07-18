@@ -1,10 +1,15 @@
 # launchd plist generator
 
-macOSのlaunchd用plistを、フォーム入力だけで生成できるツールです。
+https://launchd-plist-generator.orukubami.sh
+
+macOSのlaunchd用plistを、フォーム入力だけで生成できるツールです。  
 あわせてlaunchdの日本語解説ドキュメントを収録しています。
+
+<img src="docs/images/screenshot.png" width="720" alt="launchd plist generator のスクリーンショット">
 
 ## 使い方
 
+https://launchd-plist-generator.orukubami.sh にアクセスするか、
 `index.html` をブラウザで開くだけです。
 
 ```sh

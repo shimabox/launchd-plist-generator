@@ -178,6 +178,10 @@
     padding: 0 24px 32px;
     font-size: 12px;
     color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
   }
   footer a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
   footer a:hover { color: var(--accent); }
@@ -313,11 +317,18 @@
 </main>
 
 <footer>
-  launchd をもっと知る:
-  <a href="docs/hajimete-no-launchd.md">はじめて向け</a> ·
-  <a href="docs/intro.md">入門</a> ·
-  <a href="docs/guide.md">実用ガイド</a> ·
-  <a href="docs/reference.md">リファレンス</a>
+  <span>
+    launchd をもっと知る:
+    <a href="https://github.com/shimabox/launchd-plist-generator/blob/main/docs/hajimete-no-launchd.md">はじめて向け</a> ·
+    <a href="https://github.com/shimabox/launchd-plist-generator/blob/main/docs/intro.md">入門</a> ·
+    <a href="https://github.com/shimabox/launchd-plist-generator/blob/main/docs/guide.md">実用ガイド</a> ·
+    <a href="https://github.com/shimabox/launchd-plist-generator/blob/main/docs/reference.md">リファレンス</a> ·
+    <a href="https://github.com/shimabox/launchd-plist-generator/blob/main/docs/use-cases.md">ユースケース集</a>
+  </span>
+  <span>
+    <a href="https://github.com/shimabox/launchd-plist-generator">GitHub</a> ·
+    <a href="https://x.com/shimabox">X (@shimabox)</a>
+  </span>
 </footer>
 
 <script src="generator.js"></script>
