@@ -342,9 +342,34 @@
       if (values[key] != null) input.value = values[key];
       input.addEventListener('input', update);
     }
-    row.querySelector('.removeCal').addEventListener('click', () => { row.remove(); update(); });
+    row.querySelector('.removeCal').addEventListener('click', () => {
+      row.remove();
+      ensureCalRows();
+      update();
+    });
     calRows.appendChild(row);
+    refreshCalRemoveButtons();
   }
+
+  // 最後の 1 行は削除できないようにする (時刻指定なしにしたい場合は空欄のままにする)
+  function refreshCalRemoveButtons() {
+    const rows = calRows.querySelectorAll('.cal-row');
+    const single = rows.length <= 1;
+    for (const row of rows) {
+      const btn = row.querySelector('.removeCal');
+      btn.disabled = single;
+      btn.title = single
+        ? '最後の 1 行は削除できません (空欄のままなら時刻指定なしになります)'
+        : 'この行を削除';
+    }
+  }
+
+  // 行が必ず 1 行以上ある状態を保つ (読み込み・復元の経路でも使う)
+  function ensureCalRows() {
+    if (calRows.querySelectorAll('.cal-row').length === 0) addCalRow();
+    refreshCalRemoveButtons();
+  }
+
   $('addCal').addEventListener('click', () => { addCalRow(); update(); });
 
   /* ---- 入力内容の保存・復元 (localStorage) ---- */
@@ -430,6 +455,7 @@
   } else {
     addCalRow({ Hour: 9, Minute: 0 }); // 初期値: 毎朝9時
   }
+  ensureCalRows(); // 行ゼロの保存値 (旧仕様) から復元しても必ず 1 行は表示する
 
   /* ---- フォーム → config ---- */
   function numOrNull(v) {
@@ -634,6 +660,7 @@
     $('throttle').value = c.throttleInterval ?? '';
     calRows.innerHTML = '';
     for (const entry of c.calendarIntervals) addCalRow(entry);
+    ensureCalRows(); // 時刻指定のない plist を読み込んでも空の 1 行を出す
   }
 
   function importPlistText(text, sourceName) {
