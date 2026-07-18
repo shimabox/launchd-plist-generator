@@ -9,7 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { generatePlist } = require('../generator.js');
+const { generatePlist, plistDictToConfig } = require('../generator.js');
 
 const base = {
   label: 'com.example.test',
@@ -172,6 +172,147 @@ test('すべての検証結果に field が付く', () => {
   for (const i of r.issues) {
     assert.ok(i.field, `field がない: ${i.message}`);
   }
+});
+
+test('plist 読み込み: 対応キーがすべて config にマッピングされる', () => {
+  const { config, notes } = plistDictToConfig({
+    Label: 'com.example.job',
+    ProgramArguments: ['/usr/bin/say', 'hello'],
+    WorkingDirectory: '/Users/u/project',
+    EnvironmentVariables: { PATH: '/usr/bin:/bin' },
+    StandardOutPath: '/tmp/o.log',
+    StandardErrorPath: '/tmp/e.log',
+    RunAtLoad: true,
+    StartCalendarInterval: [{ Hour: 9, Minute: 0 }, { Weekday: 5, Hour: 18 }],
+    KeepAlive: { SuccessfulExit: false },
+    ProcessType: 'Background',
+    ThrottleInterval: 30,
+  });
+  assert.strictEqual(config.label, 'com.example.job');
+  assert.deepStrictEqual(config.programArguments, ['/usr/bin/say', 'hello']);
+  assert.deepStrictEqual(config.environmentVariables, { PATH: '/usr/bin:/bin' });
+  assert.strictEqual(config.runAtLoad, true);
+  assert.strictEqual(config.calendarIntervals.length, 2);
+  assert.strictEqual(config.calendarIntervals[1].Weekday, 5);
+  assert.strictEqual(config.keepAlive, 'on-failure');
+  assert.strictEqual(config.processType, 'Background');
+  assert.strictEqual(config.throttleInterval, 30);
+  assert.strictEqual(notes.length, 0);
+  // 読み込んだ config はそのまま再生成してもエラーにならない
+  assert.strictEqual(generatePlist(config).issues.filter((i) => i.level === 'error').length, 0);
+});
+
+test('plist 読み込み: 対応外キーは喪失警告として報告される', () => {
+  const { notes } = plistDictToConfig({
+    Label: 'com.example.job',
+    ProgramArguments: ['/bin/true'],
+    Sockets: { Listener: { SockServiceName: '8080' } },
+    UserName: 'daemonuser',
+  });
+  const lossNote = notes.find((n) => n.includes('対応外のキー'));
+  assert.ok(lossNote);
+  assert.ok(lossNote.includes('Sockets'));
+  assert.ok(lossNote.includes('UserName'));
+  assert.ok(lossNote.includes('失われます'));
+});
+
+test('plist 読み込み: Program のみの指定は argv として取り込む', () => {
+  const { config } = plistDictToConfig({ Label: 'a.b', Program: '/usr/bin/true' });
+  assert.deepStrictEqual(config.programArguments, ['/usr/bin/true']);
+});
+
+test('plist 読み込み: Program と ProgramArguments の併用は拒否する', () => {
+  // 実行ファイル (/bin/echo) と argv[0] (custom-argv0) が異なる構成は表現できない
+  assert.throws(
+    () => plistDictToConfig({ Program: '/bin/echo', ProgramArguments: ['custom-argv0', 'hello'] }),
+    /Program と ProgramArguments が両方/
+  );
+});
+
+test('plist 読み込み: フォームで表現できない引数は喪失警告を出す', () => {
+  const { notes } = plistDictToConfig({
+    Label: 'a.b',
+    ProgramArguments: ['/bin/echo', '', 'a\nb', ' padded '],
+  });
+  const note = notes.find((n) => n.includes('1 行 1 引数'));
+  assert.ok(note);
+  assert.ok(note.includes('""'));
+  assert.ok(note.includes('a\\nb'));
+  assert.ok(note.includes('" padded "'));
+});
+
+test('plist 読み込み: 引数以外でフォームで保持できない値も警告する', () => {
+  const { notes } = plistDictToConfig({
+    Label: 'a.b',
+    ProgramArguments: ['/bin/true'],
+    EnvironmentVariables: { A: 'first\nsecond', B: 'value  ' },
+    WatchPaths: ['/tmp/path  '],
+    QueueDirectories: [''],
+    WorkingDirectory: ' /tmp/wd',
+    StandardOutPath: '/tmp/o.log\n',
+  });
+  assert.ok(notes.some((n) => n.includes('EnvironmentVariables') && n.includes('first\\nsecond') && n.includes('value')));
+  assert.ok(notes.some((n) => n.includes('WatchPaths') && n.includes('/tmp/path')));
+  assert.ok(notes.some((n) => n.includes('QueueDirectories') && n.includes('""')));
+  assert.ok(notes.some((n) => n.includes('WorkingDirectory')));
+  assert.ok(notes.some((n) => n.includes('StandardOutPath')));
+});
+
+test('plist 読み込み: 前後に空白のある Label と空の環境変数名も警告する', () => {
+  const { notes } = plistDictToConfig({
+    Label: ' padded.label ',
+    ProgramArguments: ['/bin/true'],
+    EnvironmentVariables: { '': 'x' },
+  });
+  assert.ok(notes.some((n) => n.includes('Label') && n.includes('padded.label')));
+  assert.ok(notes.some((n) => n.includes('EnvironmentVariables') && n.includes('=x')));
+});
+
+test('plist 読み込み: 正常な値では喪失警告が出ない (再確認)', () => {
+  const { notes } = plistDictToConfig({
+    Label: 'a.b',
+    ProgramArguments: ['/bin/true'],
+    EnvironmentVariables: { PATH: '/usr/bin:/bin' },
+    WatchPaths: ['/tmp/inbox'],
+    WorkingDirectory: '/tmp/wd',
+  });
+  assert.strictEqual(notes.length, 0);
+});
+
+test('plist 読み込み: KeepAlive のバリエーション', () => {
+  assert.strictEqual(plistDictToConfig({ KeepAlive: true }).config.keepAlive, 'always');
+  assert.strictEqual(plistDictToConfig({ KeepAlive: false }).config.keepAlive, 'off');
+  // 扱えない条件は off のまま警告
+  const complex = plistDictToConfig({ KeepAlive: { PathState: { '/tmp/x': true } } });
+  assert.strictEqual(complex.config.keepAlive, 'off');
+  assert.ok(complex.notes.some((n) => n.includes('PathState')));
+});
+
+test('plist 読み込み: 単一 dict の StartCalendarInterval も配列として取り込む', () => {
+  const { config } = plistDictToConfig({ StartCalendarInterval: { Hour: 7, Minute: 30 } });
+  assert.strictEqual(config.calendarIntervals.length, 1);
+  assert.strictEqual(config.calendarIntervals[0].Hour, 7);
+});
+
+test('plist 読み込み: 空の StartCalendarInterval (毎分実行の意味) は喪失警告を出す', () => {
+  const { config, notes } = plistDictToConfig({
+    Label: 'a.b',
+    ProgramArguments: ['/bin/true'],
+    StartCalendarInterval: {},
+  });
+  assert.strictEqual(config.calendarIntervals.length, 0);
+  assert.ok(notes.some((n) => n.includes('毎分実行') && n.includes('失われます') && n.includes('StartInterval に 60')));
+});
+
+test('plist 読み込み: 配列中の空の予定だけが除外され、正常な予定は残る', () => {
+  const { config, notes } = plistDictToConfig({
+    StartCalendarInterval: [{}, { Hour: 9, Minute: 0 }, { Era: 1 }],
+  });
+  assert.strictEqual(config.calendarIntervals.length, 1);
+  assert.strictEqual(config.calendarIntervals[0].Hour, 9);
+  // {} と、対応外フィールドのみで空になった {Era:1} の計 2 件
+  assert.ok(notes.some((n) => n.includes('空の予定が 2 件')));
+  assert.ok(notes.some((n) => n.includes('対応外のフィールド')));
 });
 
 test('field は index.html の FIELD_TARGETS と入力欄 id に対応している', () => {

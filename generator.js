@@ -336,6 +336,217 @@ function buildCommands(label) {
   ].join('\n');
 }
 
+/* ---------- plist の読み込み (逆変換) ---------- */
+
+// plist XML テキスト → JS 値ツリー。DOMParser を使うためブラウザ専用。
+function parsePlistXml(text) {
+  if (typeof DOMParser === 'undefined') {
+    throw new Error('parsePlistXml はブラウザでのみ使えます');
+  }
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new Error('XML として解析できません');
+  const root = doc.documentElement;
+  if (root.tagName !== 'plist') throw new Error('plist 形式ではありません');
+  const dictEl = [...root.children].find((el) => el.tagName === 'dict');
+  if (!dictEl) throw new Error('plist 直下に dict がありません');
+  return plistXmlToValue(dictEl);
+}
+
+function plistXmlToValue(el) {
+  switch (el.tagName) {
+    case 'dict': {
+      const obj = {};
+      const children = [...el.children];
+      for (let i = 0; i < children.length; i += 2) {
+        if (children[i].tagName === 'key' && children[i + 1]) {
+          obj[children[i].textContent] = plistXmlToValue(children[i + 1]);
+        }
+      }
+      return obj;
+    }
+    case 'array':
+      return [...el.children].map(plistXmlToValue);
+    case 'integer':
+      return parseInt(el.textContent, 10);
+    case 'real':
+      return parseFloat(el.textContent);
+    case 'true':
+      return true;
+    case 'false':
+      return false;
+    default:
+      // string のほか、date / data も文字列として保持する
+      return el.textContent;
+  }
+}
+
+// plist の dict (JS オブジェクト) → このツールの config。純粋関数なので Node からもテストできる。
+// 戻り値の notes には、対応外キーの喪失警告など利用者に伝えるべきことが入る。
+function plistDictToConfig(dict) {
+  const notes = [];
+  const handled = new Set();
+  const take = (key) => {
+    handled.add(key);
+    return dict[key];
+  };
+  const config = {
+    label: '',
+    programArguments: [],
+    workingDirectory: '',
+    environmentVariables: {},
+    standardOutPath: '',
+    standardErrorPath: '',
+    runAtLoad: false,
+    startInterval: null,
+    calendarIntervals: [],
+    watchPaths: [],
+    queueDirectories: [],
+    keepAlive: 'off',
+    processType: '',
+    throttleInterval: null,
+  };
+
+  if (typeof dict.Label === 'string') config.label = take('Label');
+  if (Array.isArray(dict.ProgramArguments)) {
+    config.programArguments = take('ProgramArguments').map(String);
+  }
+  if (typeof dict.Program === 'string') {
+    if (config.programArguments.length > 0) {
+      // Program が実行ファイル・ProgramArguments が argv になる構成。argv[0] と実行ファイルが
+      // 異なり得るため、ProgramArguments しか持たないこのツールでは正確に表現できない
+      throw new Error(
+        'Program と ProgramArguments が両方指定されています。この構成は実行ファイル (Program) と argv[0] が異なる場合があり、このツールでは正確に表現できないため読み込めません。plist を直接編集してください'
+      );
+    }
+    config.programArguments = [take('Program')];
+  }
+
+  // フォームは「1 行 1 引数」形式のため、空の引数・改行入り・前後に空白のある引数は保持できない
+  const unrepresentable = config.programArguments.filter(
+    (a) => a === '' || a.includes('\n') || a !== a.trim()
+  );
+  if (unrepresentable.length > 0) {
+    notes.push(
+      '空の引数・改行を含む引数・前後に空白のある引数はフォームの「1 行 1 引数」形式で表現できないため、取り込み後に失われるか変化します: ' +
+        unrepresentable.map((a) => JSON.stringify(a)).join(', ')
+    );
+  }
+  if (typeof dict.WorkingDirectory === 'string') config.workingDirectory = take('WorkingDirectory');
+  if (typeof dict.StandardOutPath === 'string') config.standardOutPath = take('StandardOutPath');
+  if (typeof dict.StandardErrorPath === 'string') config.standardErrorPath = take('StandardErrorPath');
+  if (typeof dict.RunAtLoad === 'boolean') config.runAtLoad = take('RunAtLoad');
+  if (typeof dict.StartInterval === 'number') config.startInterval = take('StartInterval');
+  if (typeof dict.ThrottleInterval === 'number') config.throttleInterval = take('ThrottleInterval');
+
+  if (dict.EnvironmentVariables && typeof dict.EnvironmentVariables === 'object' && !Array.isArray(dict.EnvironmentVariables)) {
+    for (const [k, v] of Object.entries(take('EnvironmentVariables'))) {
+      config.environmentVariables[k] = String(v);
+    }
+  }
+
+  if (dict.StartCalendarInterval !== undefined) {
+    const raw = take('StartCalendarInterval');
+    const entries = Array.isArray(raw) ? raw : [raw];
+    let hasUnknownField = false;
+    let emptyEntryCount = 0;
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
+      const c = {};
+      for (const f of CALENDAR_FIELDS) {
+        if (typeof entry[f.key] === 'number') c[f.key] = entry[f.key];
+      }
+      hasUnknownField = hasUnknownField || Object.keys(entry).some((k) => !CALENDAR_FIELDS.some((f) => f.key === k));
+      if (Object.keys(c).length === 0) {
+        // launchd では全フィールド省略 = 全ワイルドカード = 毎分実行の意味を持つが、
+        // このツールは空の予定を「未入力」として扱い生成しないため、そのまま取り込むと意味が変わる
+        emptyEntryCount++;
+      } else {
+        config.calendarIntervals.push(c);
+      }
+    }
+    if (hasUnknownField) {
+      notes.push('StartCalendarInterval に対応外のフィールドが含まれていたため、その部分は取り込めませんでした。');
+    }
+    if (emptyEntryCount > 0) {
+      notes.push(
+        `StartCalendarInterval に空の予定が ${emptyEntryCount} 件あります。launchd では全フィールド省略は「毎分実行」を意味しますが、このツールでは表現できないため取り込み後に失われます。毎分実行が必要な場合は StartInterval に 60 を指定してください。`
+      );
+    }
+  }
+
+  if (Array.isArray(dict.WatchPaths)) config.watchPaths = take('WatchPaths').map(String);
+  if (Array.isArray(dict.QueueDirectories)) config.queueDirectories = take('QueueDirectories').map(String);
+
+  if (dict.KeepAlive !== undefined) {
+    const raw = take('KeepAlive');
+    if (raw === true) {
+      config.keepAlive = 'always';
+    } else if (raw === false) {
+      config.keepAlive = 'off';
+    } else if (raw && typeof raw === 'object') {
+      if (raw.SuccessfulExit === false) {
+        config.keepAlive = 'on-failure';
+        const others = Object.keys(raw).filter((k) => k !== 'SuccessfulExit');
+        if (others.length > 0) {
+          notes.push(`KeepAlive の条件のうち ${others.join(', ')} はこのツールでは扱えないため、取り込めませんでした。`);
+        }
+      } else {
+        notes.push('KeepAlive の条件 (' + Object.keys(raw).join(', ') + ') はこのツールでは扱えないため、取り込めませんでした。');
+      }
+    }
+  }
+
+  if (typeof dict.ProcessType === 'string') {
+    const pt = take('ProcessType');
+    if (pt === 'Standard') {
+      config.processType = '';
+    } else if (['Background', 'Adaptive', 'Interactive'].includes(pt)) {
+      config.processType = pt;
+    } else {
+      notes.push(`ProcessType「${pt}」は不明な値のため、取り込めませんでした。`);
+    }
+  }
+
+  // 引数以外のフィールドについても、フォームの形式で保持できない値を警告する。
+  // テキストエリアは「1 行 1 項目」で前後の空白を除去し、単一行入力は改行を持てないため。
+  const reportLoss = (name, values) => {
+    if (values.length > 0) {
+      notes.push(
+        `${name} にフォームで保持できない値 (空文字・改行・前後の空白) が含まれるため、取り込み後に失われるか変化します: ` +
+          values.map((v) => JSON.stringify(v)).join(', ')
+      );
+    }
+  };
+  const lineLoss = (s) => s === '' || s.includes('\n') || s !== s.trim();
+  if (config.label !== '' && (config.label.includes('\n') || config.label !== config.label.trim())) {
+    reportLoss('Label', [config.label]);
+  }
+  reportLoss('WatchPaths', config.watchPaths.filter(lineLoss));
+  reportLoss('QueueDirectories', config.queueDirectories.filter(lineLoss));
+  for (const [name, v] of [
+    ['WorkingDirectory', config.workingDirectory],
+    ['StandardOutPath', config.standardOutPath],
+    ['StandardErrorPath', config.standardErrorPath],
+  ]) {
+    if (v !== '' && (v.includes('\n') || v !== v.trim())) reportLoss(name, [v]);
+  }
+  reportLoss(
+    'EnvironmentVariables',
+    Object.entries(config.environmentVariables)
+      .filter(([k, v]) =>
+        k === '' || k !== k.trim() || k.includes('\n') || k.includes('=') || v.includes('\n') || v !== v.trimEnd()
+      )
+      .map(([k, v]) => `${k}=${v}`)
+  );
+
+  const unsupported = Object.keys(dict).filter((k) => !handled.has(k));
+  if (unsupported.length > 0) {
+    notes.push(`対応外のキーが含まれています: ${unsupported.join(', ')} — このツールで再生成すると、これらのキーは失われます。`);
+  }
+
+  return { config, notes };
+}
+
 /* ---------- エントリポイント ---------- */
 
 function generatePlist(config) {
@@ -351,5 +562,5 @@ function generatePlist(config) {
 
 // Node.js (CLI 版) から require できるようにする。ブラウザではグローバルに公開される。
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { generatePlist, CALENDAR_FIELDS, LAUNCHD_DEFAULT_PATH };
+  module.exports = { generatePlist, parsePlistXml, plistDictToConfig, CALENDAR_FIELDS, LAUNCHD_DEFAULT_PATH };
 }

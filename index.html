@@ -190,7 +190,11 @@
     <p>フォームに入力すると、右側に plist と登録コマンドが即時生成されます。入力内容はこのブラウザに自動保存されます。</p>
     <p id="storageWarn" role="alert" hidden>⚠ このブラウザでは入力内容を保存できません。ページを再読み込みすると入力が消えます。</p>
   </div>
-  <button type="button" id="reset">入力をリセット</button>
+  <div class="row" style="flex-wrap: nowrap">
+    <button type="button" id="importBtn" title="既存の .plist を読み込んでフォームに展開します (ページへのドラッグ &amp; ドロップでも可)">plist を読み込む</button>
+    <button type="button" id="reset">入力をリセット</button>
+  </div>
+  <input type="file" id="importFile" accept=".plist,.xml,text/xml,application/xml" hidden>
 </header>
 
 <main>
@@ -284,6 +288,7 @@
 
   <!-- ========== 出力 ========== -->
   <section>
+    <ul class="issues" id="importNotes" aria-live="polite"></ul>
     <ul class="issues" id="issues"></ul>
 
     <div class="outblock">
@@ -597,7 +602,92 @@
       localStorage.removeItem(STORAGE_KEY);
     } catch {}
     resetForm();
+    $('importNotes').innerHTML = '';
     update();
+  });
+
+  /* ---- plist の読み込み (逆変換) ---- */
+  function showImportNotes(messages, level) {
+    const ul = $('importNotes');
+    ul.innerHTML = '';
+    for (const message of messages) {
+      const li = document.createElement('li');
+      li.className = 'issue-' + level;
+      li.textContent = message;
+      ul.appendChild(li);
+    }
+  }
+
+  function applyImportedConfig(c) {
+    $('label').value = c.label;
+    $('args').value = c.programArguments.join('\n');
+    $('wd').value = c.workingDirectory;
+    $('env').value = Object.entries(c.environmentVariables).map(([k, v]) => `${k}=${v}`).join('\n');
+    $('stdout').value = c.standardOutPath;
+    $('stderr').value = c.standardErrorPath;
+    $('runAtLoad').checked = c.runAtLoad;
+    $('interval').value = c.startInterval ?? '';
+    $('watch').value = c.watchPaths.join('\n');
+    $('queue').value = c.queueDirectories.join('\n');
+    $('keepAlive').value = c.keepAlive;
+    $('processType').value = c.processType;
+    $('throttle').value = c.throttleInterval ?? '';
+    calRows.innerHTML = '';
+    for (const entry of c.calendarIntervals) addCalRow(entry);
+  }
+
+  function importPlistText(text, sourceName) {
+    if (text.startsWith('bplist')) {
+      showImportNotes([
+        `✕ 「${sourceName}」はバイナリ形式の plist のため読み込めません。` +
+          `ターミナルで plutil -convert xml1 ファイル名 を実行して XML 形式に変換してから読み込んでください。`,
+      ], 'error');
+      return;
+    }
+    let dict;
+    try {
+      dict = parsePlistXml(text);
+    } catch (e) {
+      showImportNotes([`✕ 「${sourceName}」を plist として読み込めませんでした (${e.message})。`], 'error');
+      return;
+    }
+    let config, notes;
+    try {
+      ({ config, notes } = plistDictToConfig(dict));
+    } catch (e) {
+      showImportNotes([`✕ 「${sourceName}」を読み込めませんでした。${e.message}。`], 'error');
+      return;
+    }
+    // ログや環境変数だけ入力済みのケースもあるため、読み込みは常に確認を挟む。
+    // 喪失警告は上書きしてからでは遅いので、確認ダイアログの本文に含めて先に見せる
+    let message = `フォームの内容を「${sourceName}」の内容で上書きしますか?`;
+    if (notes.length > 0) {
+      message += '\n\n注意:\n' + notes.map((n) => `・${n}`).join('\n');
+    }
+    if (!confirm(message)) return;
+
+    applyImportedConfig(config);
+    if (notes.length > 0) {
+      showImportNotes(notes.map((n) => `⚠ ${sourceName}: ${n}`), 'warn');
+    } else {
+      showImportNotes([`「${sourceName}」を読み込みました。`], 'info');
+    }
+    update();
+  }
+
+  $('importBtn').addEventListener('click', () => $('importFile').click());
+  $('importFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (file) importPlistText(await file.text(), file.name);
+    e.target.value = ''; // 同じファイルをもう一度選べるようにする
+  });
+
+  // ページ全体へのドラッグ & ドロップでも読み込めるようにする
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer && e.dataTransfer.files[0];
+    if (file) importPlistText(await file.text(), file.name);
   });
 
   /* ---- 全入力で即時更新 ---- */
