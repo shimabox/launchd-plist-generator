@@ -9,7 +9,8 @@
  *   result.xml      … plist の XML 文字列
  *   result.filename … 推奨ファイル名 (<Label>.plist)
  *   result.commands … 登録・テスト・解除の launchctl コマンド一式
- *   result.issues   … [{level: 'error'|'warn'|'info', message}] 検証結果
+ *   result.issues   … [{level: 'error'|'warn'|'info', message, field}] 検証結果
+ *                     (field は対象フィールド名。UI が入力欄と紐付けるためのヒント)
  *
  * config の形:
  * {
@@ -55,24 +56,24 @@ function isAbsolutePath(p) {
 
 function validate(config) {
   const issues = [];
-  const error = (message) => issues.push({ level: 'error', message });
-  const warn = (message) => issues.push({ level: 'warn', message });
-  const info = (message) => issues.push({ level: 'info', message });
+  const error = (message, field) => issues.push({ level: 'error', message, field });
+  const warn = (message, field) => issues.push({ level: 'warn', message, field });
+  const info = (message, field) => issues.push({ level: 'info', message, field });
 
   // Label
   const label = (config.label || '').trim();
   if (!label) {
-    error('Label は必須です。逆 DNS 形式 (例: com.username.jobname) で付けてください。');
+    error('Label は必須です。逆 DNS 形式 (例: com.username.jobname) で付けてください。', 'label');
   } else if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(label)) {
-    error('Label に使えるのは英数字と . _ - だけです (空白や記号は不可)。ファイル名やシェルコマンドに安全に埋め込めません。');
+    error('Label に使えるのは英数字と . _ - だけです (空白や記号は不可)。ファイル名やシェルコマンドに安全に埋め込めません。', 'label');
   } else if (!label.includes('.')) {
-    info('Label は逆 DNS 形式 (com.username.jobname) にするのが慣習です。');
+    info('Label は逆 DNS 形式 (com.username.jobname) にするのが慣習です。', 'label');
   }
 
   // ProgramArguments
   const args = (config.programArguments || []).filter((a) => a !== '');
   if (args.length === 0) {
-    error('実行するコマンド (ProgramArguments) を最低 1 つ指定してください。');
+    error('実行するコマンド (ProgramArguments) を最低 1 つ指定してください。', 'programArguments');
   } else {
     const argv0 = args[0];
     const isShellWrapper = /\/(sh|bash|zsh|dash)$/.test(argv0);
@@ -81,13 +82,14 @@ function validate(config) {
       warn(
         `実行コマンド「${argv0}」は絶対パスで書くことを強く推奨します。` +
           `launchd の PATH は ${LAUNCHD_DEFAULT_PATH} だけなので、それ以外の場所のコマンドは見つかりません` +
-          ' (exit 127 の典型原因)。ターミナルで `which ' + argv0 + '` と打つとフルパスが分かります。'
+          ' (exit 127 の典型原因)。ターミナルで `which ' + argv0 + '` と打つとフルパスが分かります。',
+        'programArguments'
       );
     }
 
     for (const a of args) {
       if (/(^|[\s:="'])~\//.test(a) || a === '~') {
-        warn(`「${a}」に ~ が含まれています。launchd は ~ を展開しないので、/Users/ユーザー名/... と絶対パスで書いてください。`);
+        warn(`「${a}」に ~ が含まれています。launchd は ~ を展開しないので、/Users/ユーザー名/... と絶対パスで書いてください。`, 'programArguments');
         break;
       }
     }
@@ -98,7 +100,8 @@ function validate(config) {
         info(
           `引数「${shelly}」にシェルの記号 (| > * $ など) が含まれています。ただの文字列として渡したいなら問題ありませんが、` +
             'ProgramArguments はシェルを介さないため、パイプ・リダイレクト・変数展開などの「シェルの機能」を期待している場合は動きません。' +
-            'その場合は /bin/zsh -c \'コマンド\' の形にするか、スクリプトファイルに切り出してください。'
+            'その場合は /bin/zsh -c \'コマンド\' の形にするか、スクリプトファイルに切り出してください。',
+          'programArguments'
         );
       }
     }
@@ -106,18 +109,20 @@ function validate(config) {
 
   // パス系フィールドの絶対パスチェック
   const pathFields = [
-    ['WorkingDirectory', config.workingDirectory],
-    ['StandardOutPath', config.standardOutPath],
-    ['StandardErrorPath', config.standardErrorPath],
+    ['WorkingDirectory', config.workingDirectory, 'workingDirectory'],
+    ['StandardOutPath', config.standardOutPath, 'standardOutPath'],
+    ['StandardErrorPath', config.standardErrorPath, 'standardErrorPath'],
   ];
-  for (const [name, value] of pathFields) {
+  for (const [name, value, field] of pathFields) {
     if (value && !isAbsolutePath(value)) {
-      warn(`${name}「${value}」は絶対パス (/ から始まるパス) で書いてください。~ や相対パスは使えません。`);
+      warn(`${name}「${value}」は絶対パス (/ から始まるパス) で書いてください。~ や相対パスは使えません。`, field);
     }
   }
-  for (const p of [...(config.watchPaths || []), ...(config.queueDirectories || [])]) {
-    if (p && !isAbsolutePath(p)) {
-      warn(`監視パス「${p}」は絶対パスで書いてください。`);
+  for (const [paths, field] of [[config.watchPaths, 'watchPaths'], [config.queueDirectories, 'queueDirectories']]) {
+    for (const p of paths || []) {
+      if (p && !isAbsolutePath(p)) {
+        warn(`監視パス「${p}」は絶対パスで書いてください。`, field);
+      }
     }
   }
 
@@ -125,7 +130,7 @@ function validate(config) {
   const env = config.environmentVariables || {};
   for (const [k, v] of Object.entries(env)) {
     if (/\$[({A-Za-z_]/.test(v)) {
-      info(`環境変数 ${k} の値に $ が含まれていますが、他の変数は展開されず文字列のまま渡されます。`);
+      info(`環境変数 ${k} の値に $ が含まれていますが、他の変数は展開されず文字列のまま渡されます。`, 'environmentVariables');
     }
   }
 
@@ -142,7 +147,7 @@ function validate(config) {
     config.keepAlive === 'always' ||
     config.keepAlive === 'on-failure';
   if (!hasTrigger) {
-    warn('起動トリガーがひとつもありません。このままでは登録しても自動では実行されません (launchctl kickstart での手動実行のみ可能)。');
+    warn('起動トリガーがひとつもありません。このままでは登録しても自動では実行されません (launchctl kickstart での手動実行のみ可能)。', 'trigger');
   }
 
   // StartCalendarInterval の範囲チェック
@@ -151,40 +156,40 @@ function validate(config) {
       const v = c[f.key];
       if (v == null) continue;
       if (!Number.isInteger(v) || v < f.min || v > f.max) {
-        error(`StartCalendarInterval の ${f.key} (${f.label}) は ${f.min}〜${f.max} の整数で指定してください (指定値: ${v})。`);
+        error(`StartCalendarInterval の ${f.key} (${f.label}) は ${f.min}〜${f.max} の整数で指定してください (指定値: ${v})。`, 'calendar');
       }
     }
   }
 
   // Day と Weekday の同時指定は OR 条件になる
   if (calendars.some((c) => c.Day != null && c.Weekday != null)) {
-    warn('日 (Day) と曜日 (Weekday) を同じ行で指定すると AND ではなく OR として扱われます。「毎月 N 日かつ X 曜日」ではなく「毎月 N 日と、毎週 X 曜日の両方」で実行されるため、想定より頻繁に動く可能性があります。');
+    warn('日 (Day) と曜日 (Weekday) を同じ行で指定すると AND ではなく OR として扱われます。「毎月 N 日かつ X 曜日」ではなく「毎月 N 日と、毎週 X 曜日の両方」で実行されるため、想定より頻繁に動く可能性があります。', 'calendar');
   }
 
   // StartInterval
   if (config.startInterval != null) {
     if (!Number.isInteger(config.startInterval) || config.startInterval <= 0) {
-      error('StartInterval は 1 以上の整数 (秒) で指定してください。');
+      error('StartInterval は 1 以上の整数 (秒) で指定してください。', 'startInterval');
     } else if (config.startInterval < 10) {
-      warn('StartInterval が 10 秒未満です。launchd は既定で 10 秒 (ThrottleInterval) より短い間隔の再実行を抑制するため、指定どおりには動きません。');
+      warn('StartInterval が 10 秒未満です。launchd は既定で 10 秒 (ThrottleInterval) より短い間隔の再実行を抑制するため、指定どおりには動きません。', 'startInterval');
     }
   }
 
   // KeepAlive
   if (config.keepAlive === 'always') {
-    info('KeepAlive: 常駐モードです。プロセスがすぐ終了するコマンドだと約 10 秒間隔の再起動ループになるので、常駐型のプログラムにだけ使ってください。');
+    info('KeepAlive: 常駐モードです。プロセスがすぐ終了するコマンドだと約 10 秒間隔の再起動ループになるので、常駐型のプログラムにだけ使ってください。', 'keepAlive');
   } else if (config.keepAlive === 'on-failure') {
-    info('KeepAlive を指定したジョブは、登録時に 1 回自動で起動します (RunAtLoad 相当の動作を含む)。');
+    info('KeepAlive を指定したジョブは、登録時に 1 回自動で起動します (RunAtLoad 相当の動作を含む)。', 'keepAlive');
   }
 
   // ThrottleInterval
   if (config.throttleInterval != null && (!Number.isInteger(config.throttleInterval) || config.throttleInterval < 0)) {
-    error('ThrottleInterval は 0 以上の整数 (秒) で指定してください。');
+    error('ThrottleInterval は 0 以上の整数 (秒) で指定してください。', 'throttleInterval');
   }
 
   // ログの推奨
   if (!config.standardErrorPath) {
-    info('StandardErrorPath (エラーログ) の設定を推奨します。これがないと失敗したときの原因調査がほぼできません。');
+    info('StandardErrorPath (エラーログ) の設定を推奨します。これがないと失敗したときの原因調査がほぼできません。', 'standardErrorPath');
   }
 
   return issues;
