@@ -340,6 +340,12 @@
 <script src="generator.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
+  let validationVisible = false;
+
+  function updateFromInteraction() {
+    validationVisible = true;
+    update();
+  }
 
   /* ---- カレンダー行の管理 ---- */
   const calRows = $('calRows');
@@ -357,9 +363,10 @@
     for (const input of row.querySelectorAll('input')) {
       const key = input.dataset.cal;
       if (values[key] != null) input.value = values[key];
-      input.addEventListener('input', update);
+      input.addEventListener('input', updateFromInteraction);
     }
     row.querySelector('.removeCal').addEventListener('click', () => {
+      validationVisible = true;
       row.remove();
       ensureCalRows();
       update();
@@ -387,7 +394,11 @@
     refreshCalRemoveButtons();
   }
 
-  $('addCal').addEventListener('click', () => { addCalRow(); update(); });
+  $('addCal').addEventListener('click', () => {
+    validationVisible = true;
+    addCalRow();
+    update();
+  });
 
   /* ---- 入力内容の保存・復元 (localStorage) ---- */
   const STORAGE_KEY = 'launchd-plist-generator';
@@ -398,6 +409,7 @@
   function saveState() {
     const state = {
       version: 1,
+      validationVisible,
       fields: {},
       runAtLoad: $('runAtLoad').checked,
       calendar: [...calRows.querySelectorAll('.cal-row')].map((row) => {
@@ -447,6 +459,25 @@
     for (const c of state.calendar) addCalRow(c);
   }
 
+  // validationVisible を保存していなかった旧データでは、初期値から変更されているかで判定する。
+  function legacyStateHasInput(state) {
+    for (const id of TEXT_FIELDS) {
+      const value = typeof state.fields[id] === 'string' ? state.fields[id] : '';
+      if (id === 'keepAlive') {
+        if (value !== '' && value !== 'off') return true;
+      } else if (value !== '') {
+        return true;
+      }
+    }
+    if (state.runAtLoad) return true;
+    if (state.calendar.length !== 1) return true;
+    const c = state.calendar[0];
+    return Object.entries(c).some(([key, value]) => {
+      const initial = key === 'Hour' ? '9' : key === 'Minute' ? '0' : '';
+      return value !== initial;
+    });
+  }
+
   function resetForm() {
     for (const el of document.querySelectorAll(
       '#form input[type="text"], #form input[type="number"], #form textarea'
@@ -464,9 +495,13 @@
   if (saved) {
     try {
       applyState(saved);
+      validationVisible = typeof saved.validationVisible === 'boolean'
+        ? saved.validationVisible
+        : legacyStateHasInput(saved);
     } catch {
       // 想定外の保存値でも起動不能にはしない
       try { localStorage.removeItem(STORAGE_KEY); } catch {}
+      validationVisible = false;
       resetForm();
     }
   } else {
@@ -553,7 +588,7 @@
     const ul = $('issues');
     ul.innerHTML = '';
     const badge = { error: '✕ エラー', warn: '⚠ 警告', info: 'ℹ 参考' };
-    for (const issue of current.issues) {
+    for (const issue of validationVisible ? current.issues : []) {
       const li = document.createElement('li');
       li.className = 'issue-' + issue.level;
       li.textContent = `${badge[issue.level]}: ${issue.message}`;
@@ -628,12 +663,14 @@
     URL.revokeObjectURL(a.href);
   });
   $('suggestLogs').addEventListener('click', () => {
+    validationVisible = true;
     const label = $('label').value.trim() || 'myjob';
     $('stdout').value = `/Users/USERNAME/Library/Logs/${label}.log`;
     $('stderr').value = `/Users/USERNAME/Library/Logs/${label}.err.log`;
     update();
   });
   $('insertPath').addEventListener('click', () => {
+    validationVisible = true;
     const cur = $('env').value.trim();
     const tpl = 'PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
     $('env').value = cur ? cur + '\n' + tpl : tpl;
@@ -644,6 +681,7 @@
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {}
+    validationVisible = false;
     resetForm();
     $('importNotes').innerHTML = '';
     update();
@@ -710,6 +748,7 @@
     }
     if (!confirm(message)) return;
 
+    validationVisible = true;
     applyImportedConfig(config);
     if (notes.length > 0) {
       showImportNotes(notes.map((n) => `⚠ ${sourceName}: ${n}`), 'warn');
@@ -736,8 +775,8 @@
 
   /* ---- 全入力で即時更新 ---- */
   for (const el of document.querySelectorAll('#form input, #form textarea, #form select')) {
-    el.addEventListener('input', update);
-    el.addEventListener('change', update);
+    el.addEventListener('input', updateFromInteraction);
+    el.addEventListener('change', updateFromInteraction);
   }
   update();
 </script>
