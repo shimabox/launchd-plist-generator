@@ -150,6 +150,50 @@ test('~ を含む引数は警告', () => {
   assert.ok(warnsOf(r).some((i) => i.message.includes('~')));
 });
 
+test('すべての検証結果に field が付く', () => {
+  // 多数の問題を同時に発生させ、field 漏れがないことを確認する
+  const r = generatePlist({
+    label: '',
+    programArguments: ['say', '~/x'],
+    workingDirectory: 'rel',
+    standardOutPath: 'rel',
+    standardErrorPath: '',
+    environmentVariables: { A: '$B' },
+    runAtLoad: false,
+    startInterval: 5,
+    calendarIntervals: [{ Day: 1, Weekday: 1, Hour: 25 }],
+    watchPaths: ['rel'],
+    queueDirectories: ['rel'],
+    keepAlive: 'always',
+    processType: '',
+    throttleInterval: -1,
+  });
+  assert.ok(r.issues.length >= 8);
+  for (const i of r.issues) {
+    assert.ok(i.field, `field がない: ${i.message}`);
+  }
+});
+
+test('field は index.html の FIELD_TARGETS と入力欄 id に対応している', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const m = html.match(/const FIELD_TARGETS = \{([\s\S]*?)\};/);
+  assert.ok(m, 'index.html に FIELD_TARGETS がない');
+  const mapping = {};
+  for (const line of m[1].split('\n')) {
+    const mm = line.match(/^\s*(\w+): '([\w-]+)',/);
+    if (mm) mapping[mm[1]] = mm[2];
+  }
+  const fields = [
+    'label', 'programArguments', 'workingDirectory', 'standardOutPath', 'standardErrorPath',
+    'watchPaths', 'queueDirectories', 'environmentVariables', 'calendar', 'startInterval',
+    'keepAlive', 'throttleInterval', 'trigger',
+  ];
+  for (const f of fields) {
+    assert.ok(mapping[f], `FIELD_TARGETS に ${f} がない`);
+    assert.ok(html.includes(`id="${mapping[f]}"`), `id="${mapping[f]}" の要素が HTML にない`);
+  }
+});
+
 if (failed > 0) {
   console.error(`\n${failed} 件失敗`);
   process.exit(1);
