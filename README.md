@@ -30,3 +30,4 @@ launchd の仕組みを知りたい人向けに、詳しさの段階別に [docs
 | [docs/intro.md](docs/intro.md) | 最小の plist と 3 ステップの手順だけの入門 |
 | [docs/guide.md](docs/guide.md) | 実用ガイド。仕組み・主要キー・Claude Code のスケジュール実行・セキュリティ・料金 |
 | [docs/reference.md](docs/reference.md) | 網羅的リファレンス。全キー・launchctl 全サブコマンド・ドメインの詳細 |
+| [docs/use-cases.md](docs/use-cases.md) | ユースケース集。生成 AI のスケジュール起動・バックアップ・ファイル自動整理など |

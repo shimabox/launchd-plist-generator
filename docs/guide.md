@@ -17,6 +17,7 @@ macOS のジョブ管理システム **launchd** と、その設定ファイル�
 | [intro.md](intro.md) | 入門 | 最初の一歩。最小の plist と 3 ステップの手順、ハマりどころだけ |
 | **guide.md**(このファイル) | 実用 | 仕組みの解説 + よく使うキー + Claude Code スケジュール実行の実践例 |
 | [reference.md](reference.md) | 網羅 | `man launchd.plist` 相当の全キー解説、launchctl 全サブコマンド、ドメインの詳細 |
+| [use-cases.md](use-cases.md) | 応用 | ユースケース集。生成 AI のスケジュール起動ほか実用例 6 本 |
 
 ## 目次
 
