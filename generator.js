@@ -15,6 +15,8 @@
  * config の形:
  * {
  *   label: string,
+ *   username: string,                      // 任意。/Users/USERNAME/ プレースホルダ警告の抑制判定に使う
+
  *   programArguments: string[],            // argv。シェルは介さない
  *   workingDirectory: string,              // 空なら省略
  *   environmentVariables: {KEY: VALUE},    // 空オブジェクトなら省略
@@ -122,6 +124,26 @@ function validate(config) {
     for (const p of paths || []) {
       if (p && !isAbsolutePath(p)) {
         warn(`監視パス「${p}」は絶対パスで書いてください。`, field);
+      }
+    }
+  }
+
+  // /Users/USERNAME/ プレースホルダの書き換え忘れ検出。
+  // 実際のユーザー名が USERNAME の人もいるため、ユーザー名欄で USERNAME と明示されていれば出さない
+  if ((config.username || '').trim() !== 'USERNAME') {
+    const placeholder = /\/Users\/USERNAME(\/|$)/;
+    const placeholderFields = [
+      ['programArguments', (config.programArguments || []).some((a) => placeholder.test(a))],
+      ['workingDirectory', placeholder.test(config.workingDirectory || '')],
+      ['standardOutPath', placeholder.test(config.standardOutPath || '')],
+      ['standardErrorPath', placeholder.test(config.standardErrorPath || '')],
+      ['watchPaths', (config.watchPaths || []).some((p) => placeholder.test(p))],
+      ['queueDirectories', (config.queueDirectories || []).some((p) => placeholder.test(p))],
+      ['environmentVariables', Object.values(config.environmentVariables || {}).some((v) => placeholder.test(v))],
+    ];
+    for (const [field, hit] of placeholderFields) {
+      if (hit) {
+        warn('「/Users/USERNAME/」がプレースホルダのまま残っている可能性があります。実際のユーザー名に書き換えてください (ターミナルで `whoami` と打つと確認できます)。ユーザー名が本当に USERNAME の場合は、この警告は無視してかまいません。', field);
       }
     }
   }

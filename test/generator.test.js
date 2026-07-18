@@ -150,6 +150,27 @@ test('~ を含む引数は警告', () => {
   assert.ok(warnsOf(r).some((i) => i.message.includes('~')));
 });
 
+test('/Users/USERNAME/ プレースホルダの書き換え忘れは警告', () => {
+  const r = generatePlist({ ...base, standardErrorPath: '/Users/USERNAME/Library/Logs/t.err.log' });
+  const w = warnsOf(r).find((i) => i.message.includes('プレースホルダ'));
+  assert.ok(w);
+  assert.strictEqual(w.field, 'standardErrorPath');
+});
+
+test('config.username に USERNAME と明示されていればプレースホルダ警告は出ない (CLI 向け)', () => {
+  const r = generatePlist({
+    ...base,
+    username: 'USERNAME',
+    standardErrorPath: '/Users/USERNAME/Library/Logs/t.err.log',
+  });
+  assert.ok(!warnsOf(r).some((i) => i.message.includes('プレースホルダ')));
+});
+
+test('/Users/USERNAMEfoo のような別名にはプレースホルダ警告を出さない', () => {
+  const r = generatePlist({ ...base, standardErrorPath: '/Users/USERNAMEfoo/Library/Logs/t.err.log' });
+  assert.ok(!warnsOf(r).some((i) => i.message.includes('プレースホルダ')));
+});
+
 test('すべての検証結果に field が付く', () => {
   // 多数の問題を同時に発生させ、field 漏れがないことを確認する
   const r = generatePlist({
