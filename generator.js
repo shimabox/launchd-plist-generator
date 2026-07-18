@@ -63,13 +63,10 @@ function validate(config) {
   const label = (config.label || '').trim();
   if (!label) {
     error('Label は必須です。逆 DNS 形式 (例: com.username.jobname) で付けてください。');
-  } else {
-    if (/\s/.test(label)) error('Label に空白は使えません。');
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(label)) {
-      warn('Label は英数字と . _ - だけで構成するのが安全です。');
-    } else if (!label.includes('.')) {
-      info('Label は逆 DNS 形式 (com.username.jobname) にするのが慣習です。');
-    }
+  } else if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(label)) {
+    error('Label に使えるのは英数字と . _ - だけです (空白や記号は不可)。ファイル名やシェルコマンドに安全に埋め込めません。');
+  } else if (!label.includes('.')) {
+    info('Label は逆 DNS 形式 (com.username.jobname) にするのが慣習です。');
   }
 
   // ProgramArguments
@@ -142,7 +139,8 @@ function validate(config) {
     calendars.length > 0 ||
     (config.watchPaths || []).some(Boolean) ||
     (config.queueDirectories || []).some(Boolean) ||
-    config.keepAlive === 'always';
+    config.keepAlive === 'always' ||
+    config.keepAlive === 'on-failure';
   if (!hasTrigger) {
     warn('起動トリガーがひとつもありません。このままでは登録しても自動では実行されません (launchctl kickstart での手動実行のみ可能)。');
   }
@@ -158,6 +156,11 @@ function validate(config) {
     }
   }
 
+  // Day と Weekday の同時指定は OR 条件になる
+  if (calendars.some((c) => c.Day != null && c.Weekday != null)) {
+    warn('日 (Day) と曜日 (Weekday) を同じ行で指定すると AND ではなく OR として扱われます。「毎月 N 日かつ X 曜日」ではなく「毎月 N 日と、毎週 X 曜日の両方」で実行されるため、想定より頻繁に動く可能性があります。');
+  }
+
   // StartInterval
   if (config.startInterval != null) {
     if (!Number.isInteger(config.startInterval) || config.startInterval <= 0) {
@@ -170,6 +173,8 @@ function validate(config) {
   // KeepAlive
   if (config.keepAlive === 'always') {
     info('KeepAlive: 常駐モードです。プロセスがすぐ終了するコマンドだと約 10 秒間隔の再起動ループになるので、常駐型のプログラムにだけ使ってください。');
+  } else if (config.keepAlive === 'on-failure') {
+    info('KeepAlive を指定したジョブは、登録時に 1 回自動で起動します (RunAtLoad 相当の動作を含む)。');
   }
 
   // ThrottleInterval
@@ -233,12 +238,17 @@ function buildXml(config) {
 
   if (config.runAtLoad) kvBool(1, 'RunAtLoad', true);
 
-  if (config.startInterval != null && config.startInterval > 0) {
+  if (Number.isInteger(config.startInterval) && config.startInterval > 0) {
     kvInteger(1, 'StartInterval', config.startInterval);
   }
 
-  const calendars = (config.calendarIntervals || []).filter((c) =>
-    CALENDAR_FIELDS.some((f) => c[f.key] !== null && c[f.key] !== undefined)
+  // 1 フィールドでも不正な値を含む行は丸ごと除外する。
+  // 一部だけ省略すると「{Hour: 9.5, Minute: 0} が毎時 0 分になる」ような
+  // 意味の変わった予定が静かに生まれてしまうため (検証エラーは validate 側で出る)。
+  const isValidCalendarEntry = (c) =>
+    CALENDAR_FIELDS.every((f) => c[f.key] == null || (Number.isInteger(c[f.key]) && c[f.key] >= f.min && c[f.key] <= f.max));
+  const calendars = (config.calendarIntervals || []).filter(
+    (c) => CALENDAR_FIELDS.some((f) => c[f.key] !== null && c[f.key] !== undefined) && isValidCalendarEntry(c)
   );
   if (calendars.length === 1) {
     push(1, '<key>StartCalendarInterval</key>');
@@ -282,7 +292,7 @@ function buildXml(config) {
     kvString(1, 'ProcessType', config.processType);
   }
 
-  if (config.throttleInterval != null && config.throttleInterval >= 0) {
+  if (Number.isInteger(config.throttleInterval) && config.throttleInterval >= 0) {
     kvInteger(1, 'ThrottleInterval', config.throttleInterval);
   }
 
@@ -293,8 +303,15 @@ function buildXml(config) {
 
 /* ---------- コマンド生成 ---------- */
 
+// 安全な文字だけならそのまま、それ以外はシングルクォートで囲んでエスケープする。
+// Label は検証で英数字 . _ - に制限しているが、エラーを無視して使われても
+// コマンド側でインジェクションが成立しないよう二重に防ぐ。
+function shellSafe(s) {
+  return /^[A-Za-z0-9._-]+$/.test(s) ? s : "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
 function buildCommands(label) {
-  const l = label || 'com.example.myjob';
+  const l = shellSafe(label || 'com.example.myjob');
   const plistPath = `~/Library/LaunchAgents/${l}.plist`;
   return [
     '# 1. 書式チェック',
@@ -318,9 +335,10 @@ function buildCommands(label) {
 
 function generatePlist(config) {
   const label = (config.label || '').trim();
+  const safeName = label.replace(/[^A-Za-z0-9._-]/g, '-') || 'com.example.myjob';
   return {
     xml: buildXml(config),
-    filename: `${label || 'com.example.myjob'}.plist`,
+    filename: `${safeName}.plist`,
     commands: buildCommands(label),
     issues: validate(config),
   };

@@ -98,6 +98,17 @@
   button:hover { border-color: var(--accent); color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
   button.primary:hover { opacity: .9; color: var(--accent-text); }
+  button:disabled, button:disabled:hover {
+    opacity: .45;
+    cursor: not-allowed;
+    border-color: var(--border);
+    color: var(--muted);
+  }
+  button.primary:disabled, button.primary:disabled:hover {
+    background: var(--muted);
+    border-color: var(--muted);
+    color: var(--bg);
+  }
 
   /* カレンダー行 */
   .cal-row { display: grid; grid-template-columns: repeat(5, 1fr) auto; gap: 6px; margin-top: 8px; align-items: end; }
@@ -174,7 +185,8 @@
       <legend>いつ実行するか(トリガー)</legend>
 
       <label class="field">決まった時刻に(StartCalendarInterval)</label>
-      <p class="hint">空欄はワイルドカード(毎○)。曜日は 0=日曜〜6=土曜。</p>
+      <p class="hint">空欄はワイルドカード(毎○)。曜日は 0=日曜〜6=土曜。
+        日と曜日を同じ行に両方入れると OR 条件(どちらの日にも実行)になります。</p>
       <div id="calRows"></div>
       <div class="toolbar" style="justify-content: flex-start">
         <button type="button" id="addCal">+ 時刻を追加</button>
@@ -362,6 +374,13 @@
     $('xmlOut').textContent = current.xml;
     $('cmdOut').textContent = current.commands;
     $('savePath').textContent = '~/Library/LaunchAgents/' + current.filename;
+
+    // エラーがある間は不正な plist を持ち出せないようにする
+    const hasError = current.issues.some((i) => i.level === 'error');
+    for (const btn of [$('copyXml'), $('download'), $('copyCmd')]) {
+      btn.disabled = hasError;
+      btn.title = hasError ? 'エラーを解消するとコピー・ダウンロードできます' : '';
+    }
   }
 
   /* ---- ボタン類 ---- */
