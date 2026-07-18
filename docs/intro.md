@@ -1,7 +1,7 @@
-# launchd plist 入門 — 最初の一歩
+# launchd plist 入門
 
 launchd で「定期的にコマンドを実行する」ための最小限の知識だけをまとめる。
-詳しい仕組みは [README.md](README.md)(実用ガイド)、全キーの解説は
+詳しい仕組みは [guide.md](guide.md)(実用ガイド)、全キーの解説は
 [reference.md](reference.md)(網羅的リファレンス)を参照。
 
 ## launchd とは(3 行で)
@@ -16,7 +16,7 @@ launchd で「定期的にコマンドを実行する」ための最小限の知
 
 置き場所は `~/Library/LaunchAgents/`。ファイル名は `Label` と同じにする。
 
-`~/Library/LaunchAgents/com.example.hello.plist`:
+`~/Library/LaunchAgents/com.example.hello.plist` を次の内容で作る。
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -75,7 +75,7 @@ launchctl kickstart -k gui/$(id -u)/<Label>       # 今すぐ実行
 launchctl print     gui/$(id -u)/<Label>          # 状態確認
 ```
 
-plist を編集したら `bootout` → `bootstrap` で再登録する(編集しただけでは反映されない)。
+plist を編集したら、いったん `bootout` してから `bootstrap` し直して再登録する(編集しただけでは反映されない)。
 
 ## ハマりどころ 3 つ
 
@@ -95,4 +95,4 @@ plist を編集したら `bootout` → `bootstrap` で再登録する(編集し�
 | ファイル変更を検知 | `WatchPaths` | 監視パスの配列 |
 | 常駐(死んだら再起動) | `KeepAlive` | `<true/>` |
 
-次のステップ → [README.md](README.md) で仕組みと Claude Code 連携の実践例へ。
+次のステップとして、[guide.md](guide.md) で仕組みと Claude Code 連携の実践例に進もう。

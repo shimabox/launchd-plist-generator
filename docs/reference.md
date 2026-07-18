@@ -1,11 +1,9 @@
 # launchd.plist 網羅的リファレンス
 
 `man launchd.plist` に載っている主要キーをほぼすべてカバーする長編リファレンス。
-初めての人は [intro.md](intro.md)、実践的な使い方は [README.md](README.md) から読むこと。
+初めての人は [intro.md](intro.md)、実践的な使い方は [guide.md](guide.md) から読むこと。
 
-凡例: 【必須】= 必須キー、【D】= LaunchDaemon 専用または Daemon で主に意味を持つキー。
-
----
+【必須】は必須キー、【D】は LaunchDaemon 専用または Daemon で主に意味を持つキーを表す。
 
 ## 目次
 
@@ -23,8 +21,6 @@
 12. [launchctl サブコマンド一覧](#12-launchctl-サブコマンド一覧)
 13. [ドメインとセッションの詳細](#13-ドメインとセッションの詳細)
 
----
-
 ## 1. 識別・基本
 
 ### `Label`(string)【必須】
@@ -33,19 +29,17 @@
 plist のファイル名は `<Label>.plist` に揃えるのが強く推奨される(必須ではないが、
 ツールや人間の期待を裏切らないため)。
 
-### `Disabled`(boolean、既定: false)
+### `Disabled`(boolean、既定は false)
 
 plist 自体に書く「無効フラグ」。ただし現在は **`launchctl enable/disable` が管理する
 override データベースが優先される**ため、このキーはヒントに過ぎない。
-新規に書く plist では通常使わない。無効化したいなら:
+新規に書く plist では通常使わない。無効化したいなら次のようにする。
 
 ```sh
 launchctl disable gui/$(id -u)/com.example.myjob
 ```
 
 override の状態確認は `launchctl print-disabled gui/$(id -u)`。
-
----
 
 ## 2. 実行対象
 
@@ -63,13 +57,13 @@ override の状態確認は `launchctl print-disabled gui/$(id -u)`。
 </array>
 ```
 
-重要な性質:
+重要な性質は次のとおり。
 
 - **シェルを介さない**(`execvp` 直接呼び出しに近い)。パイプ、リダイレクト、
   グロブ(`*.txt`)、変数展開(`$HOME`)、チルダ展開(`~/`)はすべて使えない
 - 第 1 要素は `PATH` から検索される(`Program` と違い絶対パスでなくても動く)が、
   launchd の `PATH` は最小限なので**実務上は絶対パスで書くべき**
-- シェル機能が必要な場合は明示的にシェルを噛ませる:
+- シェル機能が必要な場合は明示的にシェルを噛ませる。
 
 ```xml
 <array>
@@ -90,18 +84,16 @@ override の状態確認は `launchctl print-disabled gui/$(id -u)`。
 バンドル(.app 等)内の相対パスで実行ファイルを指定する。`SMAppService` 等で
 アプリに同梱するヘルパーを登録する場合に使う。手書きの plist ではほぼ使わない。
 
----
-
 ## 3. 起動トリガー
 
 トリガーは複数併用できる(例: `RunAtLoad` + `StartCalendarInterval`)。
 いずれのトリガーでも、**すでに実行中のジョブは二重起動されない**(1 Label = 最大 1 プロセス)。
 
-### `RunAtLoad`(boolean、既定: false)
+### `RunAtLoad`(boolean、既定は false)
 
 ジョブがドメインに読み込まれた時点で 1 回起動する。
-「読み込まれた時点」とは: ログイン時(LaunchAgent)、システム起動時(LaunchDaemon)、
-または手動で `launchctl bootstrap` した瞬間。
+「読み込まれた時点」とは、ログイン時(LaunchAgent)、システム起動時(LaunchDaemon)、
+または手動で `launchctl bootstrap` した瞬間を指す。
 
 ### `StartInterval`(integer、秒)
 
@@ -111,7 +103,7 @@ N 秒ごとに起動する。前回の**起動時刻**基準(終了時刻では�
 
 ### `StartCalendarInterval`(dict または array of dicts)
 
-カレンダー(cron)方式。指定できるフィールド:
+カレンダー(cron)方式。指定できるフィールドは次のとおり。
 
 | フィールド | 範囲 | 備考 |
 |---|---|---|
@@ -148,26 +140,24 @@ N 秒ごとに起動する。前回の**起動時刻**基準(終了時刻では�
 ジョブは処理したファイルを**削除または移動する責務を負う**。空にしないと
 `ThrottleInterval` 間隔で延々と再起動される。
 
-### `StartOnMount`(boolean、既定: false)
+### `StartOnMount`(boolean、既定は false)
 
 ファイルシステムがマウントされたとき(USB ドライブ接続、ディスクイメージのマウント等)に起動する。
 
-### `LaunchOnlyOnce`(boolean、既定: false)
+### `LaunchOnlyOnce`(boolean、既定は false)
 
 ジョブの生存期間中に 1 回しか実行できないことを宣言する。実行後は再読み込みまで二度と起動しない。
 
----
-
 ## 4. 常駐・再起動制御 (KeepAlive)
 
-### `KeepAlive`(boolean または dict、既定: false)
+### `KeepAlive`(boolean または dict、既定は false)
 
-**boolean 形式**:
+**boolean 形式**で指定した場合の動作は次のとおり。
 
 - `true`: 無条件常駐。プロセスが終了したら(理由を問わず)再起動する
 - `false`(既定): オンデマンド。トリガー成立時のみ起動
 
-**dict 形式**(条件付き)。複数条件は AND ではなく「いずれかが再起動を要求すれば再起動」:
+**dict 形式**は条件付きの再起動制御になる。複数条件は AND ではなく「いずれかが再起動を要求すれば再起動」と解釈される。
 
 | サブキー | 型 | 意味 |
 |---|---|---|
@@ -189,8 +179,6 @@ N 秒ごとに起動する。前回の**起動時刻**基準(終了時刻では�
 > `KeepAlive` と `ThrottleInterval`(後述)はセットで理解する。
 > 即死するジョブを `KeepAlive: true` にすると 10 秒間隔の再起動ループになる。
 
----
-
 ## 5. 実行コンテキスト(ユーザー・ディレクトリ・環境変数)
 
 ### `UserName` / `GroupName`(string)【D】
@@ -198,7 +186,7 @@ N 秒ごとに起動する。前回の**起動時刻**基準(終了時刻では�
 実行ユーザー/グループ。**LaunchDaemon 専用**(Agent はセッションの所有者で動くため指定不可)。
 `UserName` を指定して `GroupName` を省略すると、そのユーザーのプライマリグループになる。
 
-### `InitGroups`(boolean、既定: true)【D】
+### `InitGroups`(boolean、既定は true)【D】
 
 `UserName` 指定時に `initgroups(3)` を呼んで補助グループを設定するか。
 
@@ -225,8 +213,8 @@ N 秒ごとに起動する。前回の**起動時刻**基準(終了時刻では�
 </dict>
 ```
 
-launchd から渡される既定の環境は最小限: `PATH=/usr/bin:/bin:/usr/sbin:/sbin`、
-`HOME`、`SHELL`、`USER`、`LOGNAME`、`TMPDIR` 程度。`~/.zshrc` 等は一切読まれない。
+launchd から渡される既定の環境は最小限で、`PATH=/usr/bin:/bin:/usr/sbin:/sbin`、
+`HOME`、`SHELL`、`USER`、`LOGNAME`、`TMPDIR` 程度しかない。`~/.zshrc` 等は一切読まれない。
 
 ### `Umask`(integer)
 
@@ -234,11 +222,9 @@ umask 値。**plist の integer は 10 進として解釈される**点に注意
 umask 022 を設定したいなら 8 進の 022 = 10 進の 18 を書く…のは分かりにくいので、
 `launchctl` 経由ではなくスクリプト内で `umask` する方が事故が少ない。
 
-### `SessionCreate`(boolean、既定: false)
+### `SessionCreate`(boolean、既定は false)
 
 新しいセキュリティセッションを作るか。通常は不要。
-
----
 
 ## 6. 入出力・ログ
 
@@ -252,13 +238,11 @@ stdout / stderr の書き出し先ファイル(**追記**モードで開かれ�
 
 stdin として開くファイル。ほぼ使わない。
 
-### 補足: os_log との関係
+### os_log との関係(補足)
 
 `StandardOutPath` を指定しない場合、stdout/stderr は基本的に捨てられる
 (一部は統合ログに乗ることもあるが当てにしない)。**デバッグ可能性のため、
 非自明なジョブでは必ず両方指定する**のが定石。
-
----
 
 ## 7. リソース制限・優先度
 
@@ -283,7 +267,7 @@ stdin として開くファイル。ほぼ使わない。
 
 ### `SoftResourceLimits` / `HardResourceLimits`(dict)
 
-`setrlimit(2)` 相当。サブキー:
+`setrlimit(2)` 相当。サブキーは
 `Core`, `CPU`, `Data`, `FileSize`, `MemoryLock`, `NumberOfFiles`,
 `NumberOfProcesses`, `ResidentSetSize`, `Stack`(いずれも integer)。
 
@@ -296,17 +280,15 @@ stdin として開くファイル。ほぼ使わない。
 </dict>
 ```
 
----
-
 ## 8. ライフサイクル・タイムアウト
 
-### `ThrottleInterval`(integer、秒、既定: 10)
+### `ThrottleInterval`(integer、秒、既定は 10)
 
 同一ジョブの再起動間の最短間隔。これより早く終了したジョブの次回起動は残り時間ぶん遅延され、
 統合ログに "respawning too quickly" 系のメッセージが出る。
 **0 にして高速ループさせる用途には使わない**こと(それはジョブ側の設計で解決する)。
 
-### `ExitTimeOut`(integer、秒、既定: 20)
+### `ExitTimeOut`(integer、秒、既定は 20)
 
 ジョブ停止時、launchd は SIGTERM を送り、この秒数待っても生きていれば SIGKILL する。
 クリーンアップに時間がかかるジョブでは延ばす。
@@ -315,7 +297,7 @@ stdin として開くファイル。ほぼ使わない。
 
 アイドルタイムアウトのヒント(オンデマンドジョブ向け)。現代ではほぼ意味を持たない。
 
-### `AbandonProcessGroup`(boolean、既定: false)
+### `AbandonProcessGroup`(boolean、既定は false)
 
 通常、launchd はジョブ終了時に**同じプロセスグループの子プロセスも SIGKILL する**。
 `true` にすると子孫を殺さず放置する。「ジョブがバックグラウンドの孫プロセスを
@@ -326,13 +308,11 @@ stdin として開くファイル。ほぼ使わない。
 XPC トランザクション/メモリ圧による自動終了への協調。XPC を使うプログラム向けで、
 シェルスクリプトのジョブでは無関係。
 
-### `LegacyTimers`(boolean、既定: false)
+### `LegacyTimers`(boolean、既定は false)
 
 `true` にするとタイマー(`StartInterval` 等)の省電力的な発火揺らぎ(coalescing)を無効化し、
 できるだけ正確な時刻に発火させる。バッテリー消費と引き換えなので、秒単位の精度が
 本当に必要なときだけ使う。
-
----
 
 ## 9. 読み込み条件 (LimitLoadTo...)
 
@@ -351,8 +331,6 @@ Agent をどのセッション種別で読み込むか。
 
 ハードウェアモデル(`hw.model` 等)で読み込みを制限/除外する。
 
----
-
 ## 10. オンデマンド起動 (Sockets / MachServices)
 
 「接続が来るまでプロセスを起動しない」ための仕組み。スケジュール実行では使わないが、
@@ -361,7 +339,7 @@ launchd の中核機能なので概観だけ押さえる。
 ### `Sockets`(dict)
 
 launchd が代理でソケットを listen し、接続到来時にジョブを起動して
-`launch_activate_socket(3)` API 経由で fd を引き渡す。主なサブキー:
+`launch_activate_socket(3)` API 経由で fd を引き渡す。主なサブキーは次のとおり。
 
 | サブキー | 意味 |
 |---|---|
@@ -386,8 +364,6 @@ nowait なら接続ごとにプロセスが起動され stdin/stdout がソケ�
 XPC / Mach IPC のサービス名を登録する。メッセージ到来でジョブが起動される。
 サブキーに `ResetAtClose`、`HideUntilCheckIn`。ネイティブアプリ開発の領域。
 
----
-
 ## 11. その他のキー
 
 | キー | 型 | 説明 |
@@ -399,8 +375,6 @@ XPC / Mach IPC のサービス名を登録する。メッセージ到来でジ�
 
 > **廃止・非推奨キー**: `OnDemand`(→ `KeepAlive` で置換)、`ServiceIPC`、
 > `HopefullyExitsFirst` / `HopefullyExitsLast`。古い記事で見かけても新規には使わない。
-
----
 
 ## 12. launchctl サブコマンド一覧
 
@@ -440,8 +414,6 @@ XPC / Mach IPC のサービス名を登録する。メッセージ到来でジ�
 | `stop <label>` | `kill SIGTERM` |
 | `list [label]` | `print`(ただし一覧表示は今も `list` が手軽) |
 
----
-
 ## 13. ドメインとセッションの詳細
 
 ### ドメインターゲットの書式
@@ -454,8 +426,8 @@ login/<asid>               → ログインセッション(監査セッション
 pid/<pid>                  → 特定プロセスのドメイン
 ```
 
-サービスターゲットはドメインターゲットに `/<label>` を付けたもの:
-`gui/501/com.example.myjob`。
+サービスターゲットはドメインターゲットに `/<label>` を付けたもので、
+`gui/501/com.example.myjob` のようになる。
 
 ### `user/<uid>` と `gui/<uid>` の違い
 
@@ -473,11 +445,9 @@ pid/<pid>                  → 特定プロセスのドメイン
 3. `RunAtLoad: true` のジョブを起動、その他はトリガー待ちで待機
 4. ログアウトでドメインごと破棄(ジョブも終了)
 
----
+## 付録 終了コード早見表
 
-## 付録: 終了コード早見表
-
-`launchctl list` の 2 列目や `launchctl print` の `last exit code` で見る値:
+`launchctl list` の 2 列目や `launchctl print` の `last exit code` で見る値は次のとおり。
 
 | コード | 意味 |
 |---|---|
