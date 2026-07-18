@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>launchd plist generator</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --text: #1c1e21;
+    --muted: #64707d;
+    --border: #d9dee4;
+    --accent: #2563eb;
+    --accent-text: #ffffff;
+    --code-bg: #0f172a;
+    --code-text: #e2e8f0;
+    --error-bg: #fdecec; --error-text: #b3261e; --error-border: #f2b8b5;
+    --warn-bg: #fff7e6;  --warn-text: #8a5a00;  --warn-border: #f0d48a;
+    --info-bg: #e8f1fd;  --info-text: #1e4f9c;  --info-border: #b3cef2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a;
+      --panel: #1e2328;
+      --text: #e8eaed;
+      --muted: #9aa5b1;
+      --border: #3a4149;
+      --accent: #4c8dff;
+      --accent-text: #ffffff;
+      --code-bg: #0b1020;
+      --code-text: #dbe4f0;
+      --error-bg: #3a1f1f; --error-text: #ffb4ab; --error-border: #6b3a36;
+      --warn-bg: #3a2f14;  --warn-text: #ffd88a;  --warn-border: #6b5a26;
+      --info-bg: #16283f;  --info-text: #a9c9f5;  --info-border: #2d4a70;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  header {
+    padding: 20px 24px 4px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  header h1 { margin: 0 0 4px; font-size: 22px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 16px 24px 48px;
+    display: grid;
+    grid-template-columns: minmax(340px, 1fr) minmax(340px, 1fr);
+    gap: 20px;
+    align-items: start;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+
+  fieldset {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px 16px;
+    margin: 0 0 16px;
+  }
+  legend { font-weight: 600; font-size: 14px; padding: 0 6px; }
+  label.field { display: block; margin: 10px 0 2px; font-size: 13px; font-weight: 600; }
+  .hint { font-size: 12px; color: var(--muted); margin: 2px 0 0; }
+  input[type="text"], input[type="number"], textarea, select {
+    width: 100%;
+    padding: 7px 9px;
+    font-size: 13px;
+    font-family: "SF Mono", Menlo, monospace;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  textarea { resize: vertical; }
+  input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .checkline { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; font-size: 13px; }
+  .checkline input { margin-top: 4px; }
+  button {
+    font-size: 12.5px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.primary:hover { opacity: .9; color: var(--accent-text); }
+
+  /* カレンダー行 */
+  .cal-row { display: grid; grid-template-columns: repeat(5, 1fr) auto; gap: 6px; margin-top: 8px; align-items: end; }
+  .cal-row label { font-size: 11px; color: var(--muted); display: block; }
+
+  /* 出力側 */
+  .issues { margin: 0 0 14px; padding: 0; list-style: none; }
+  .issues li {
+    border: 1px solid;
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    font-size: 12.5px;
+  }
+  .issue-error { background: var(--error-bg); color: var(--error-text); border-color: var(--error-border); }
+  .issue-warn  { background: var(--warn-bg);  color: var(--warn-text);  border-color: var(--warn-border); }
+  .issue-info  { background: var(--info-bg);  color: var(--info-text);  border-color: var(--info-border); }
+  .issue-ok    { background: var(--info-bg);  color: var(--info-text);  border-color: var(--info-border); }
+
+  .outblock { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px 16px; margin-bottom: 16px; }
+  .outblock h2 { margin: 0 0 4px; font-size: 14px; }
+  .outblock .sub { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .codewrap { position: relative; }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-text);
+    border-radius: 8px;
+    padding: 14px;
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-x: auto;
+    margin: 0;
+    font-family: "SF Mono", Menlo, monospace;
+  }
+  .toolbar { display: flex; gap: 8px; margin: 8px 0 0; justify-content: flex-end; }
+
+  footer {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 24px 32px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  footer a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+  footer a:hover { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>launchd plist generator</h1>
+  <p>フォームに入力すると、右側に plist と登録コマンドが即時生成されます。</p>
+</header>
+
+<main>
+  <!-- ========== 入力フォーム ========== -->
+  <form id="form" onsubmit="return false">
+
+    <fieldset>
+      <legend>基本</legend>
+
+      <label class="field" for="label">Label(ジョブの名前)</label>
+      <input type="text" id="label" placeholder="com.username.jobname" value="">
+      <p class="hint">逆 DNS 形式が慣習。ファイル名も「Label.plist」になります。</p>
+
+      <label class="field" for="args">実行するコマンド(1 行に 1 引数)</label>
+      <textarea id="args" rows="4" placeholder="/usr/bin/say&#10;こんにちは"></textarea>
+      <p class="hint">1 行目がプログラム本体(絶対パスで)。シェルは介さないのでパイプや ~ は使えません。</p>
+
+      <label class="field" for="wd">WorkingDirectory(作業ディレクトリ・任意)</label>
+      <input type="text" id="wd" placeholder="/Users/username/project">
+    </fieldset>
+
+    <fieldset>
+      <legend>いつ実行するか(トリガー)</legend>
+
+      <label class="field">決まった時刻に(StartCalendarInterval)</label>
+      <p class="hint">空欄はワイルドカード(毎○)。曜日は 0=日曜〜6=土曜。</p>
+      <div id="calRows"></div>
+      <div class="toolbar" style="justify-content: flex-start">
+        <button type="button" id="addCal">+ 時刻を追加</button>
+      </div>
+
+      <label class="field" for="interval">一定間隔で(StartInterval・秒)</label>
+      <input type="number" id="interval" min="1" placeholder="例: 300 (5分ごと)">
+
+      <div class="checkline">
+        <input type="checkbox" id="runAtLoad">
+        <label for="runAtLoad">RunAtLoad — 登録時・ログイン時に 1 回実行する</label>
+      </div>
+
+      <label class="field" for="watch">WatchPaths(このパスが変更されたら実行・1 行 1 パス)</label>
+      <textarea id="watch" rows="2" placeholder="/Users/username/Dropbox/inbox"></textarea>
+
+      <label class="field" for="queue">QueueDirectories(このフォルダが空でなければ実行・1 行 1 パス)</label>
+      <textarea id="queue" rows="2" placeholder="/Users/username/queue"></textarea>
+    </fieldset>
+
+    <fieldset>
+      <legend>ログ・環境</legend>
+
+      <label class="field" for="stdout">StandardOutPath(標準出力ログ・任意)</label>
+      <div class="row">
+        <input type="text" id="stdout" placeholder="/Users/username/Library/Logs/myjob.log" style="flex:1">
+      </div>
+
+      <label class="field" for="stderr">StandardErrorPath(エラーログ・推奨)</label>
+      <input type="text" id="stderr" placeholder="/Users/username/Library/Logs/myjob.err.log">
+      <div class="toolbar" style="justify-content: flex-start">
+        <button type="button" id="suggestLogs">Label からログパスを自動入力</button>
+      </div>
+
+      <label class="field" for="env">EnvironmentVariables(1 行に KEY=VALUE)</label>
+      <textarea id="env" rows="3" placeholder="PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"></textarea>
+      <div class="toolbar" style="justify-content: flex-start">
+        <button type="button" id="insertPath">PATH のテンプレを挿入</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>詳細(任意)</legend>
+
+      <label class="field" for="keepAlive">KeepAlive(再起動ポリシー)</label>
+      <select id="keepAlive">
+        <option value="off" selected>なし — トリガー時のみ実行(既定)</option>
+        <option value="on-failure">異常終了したときだけ再起動</option>
+        <option value="always">常駐 — 終了したら必ず再起動</option>
+      </select>
+
+      <label class="field" for="processType">ProcessType</label>
+      <select id="processType">
+        <option value="" selected>指定しない(Standard)</option>
+        <option value="Background">Background — バッチ処理向け(省電力優先)</option>
+        <option value="Interactive">Interactive — 応答性優先(乱用しない)</option>
+        <option value="Adaptive">Adaptive — XPC 向け</option>
+      </select>
+
+      <label class="field" for="throttle">ThrottleInterval(再起動の最短間隔・秒)</label>
+      <input type="number" id="throttle" min="0" placeholder="既定: 10">
+    </fieldset>
+  </form>
+
+  <!-- ========== 出力 ========== -->
+  <section>
+    <ul class="issues" id="issues"></ul>
+
+    <div class="outblock">
+      <h2>生成された plist</h2>
+      <p class="sub">保存先: <code id="savePath">~/Library/LaunchAgents/…</code></p>
+      <div class="codewrap"><pre id="xmlOut"></pre></div>
+      <div class="toolbar">
+        <button type="button" id="copyXml">コピー</button>
+        <button type="button" class="primary" id="download">ファイルをダウンロード</button>
+      </div>
+    </div>
+
+    <div class="outblock">
+      <h2>登録・テスト・解除コマンド</h2>
+      <p class="sub">ダウンロードした plist を ~/Library/LaunchAgents/ に置いてから、上から順に実行します。</p>
+      <div class="codewrap"><pre id="cmdOut"></pre></div>
+      <div class="toolbar">
+        <button type="button" id="copyCmd">コピー</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  launchd をもっと知る:
+  <a href="docs/hajimete-no-launchd.md">はじめて向け</a> ·
+  <a href="docs/intro.md">入門</a> ·
+  <a href="docs/guide.md">実用ガイド</a> ·
+  <a href="docs/reference.md">リファレンス</a>
+</footer>
+
+<script src="generator.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  /* ---- カレンダー行の管理 ---- */
+  const calRows = $('calRows');
+  function addCalRow(values = {}) {
+    const row = document.createElement('div');
+    row.className = 'cal-row';
+    row.innerHTML = `
+      <div><label>時 (0-23)</label><input type="number" data-cal="Hour" min="0" max="23" placeholder="*"></div>
+      <div><label>分 (0-59)</label><input type="number" data-cal="Minute" min="0" max="59" placeholder="*"></div>
+      <div><label>日 (1-31)</label><input type="number" data-cal="Day" min="1" max="31" placeholder="*"></div>
+      <div><label>曜日 (0-7)</label><input type="number" data-cal="Weekday" min="0" max="7" placeholder="*"></div>
+      <div><label>月 (1-12)</label><input type="number" data-cal="Month" min="1" max="12" placeholder="*"></div>
+      <button type="button" class="removeCal" title="この行を削除">×</button>
+    `;
+    for (const input of row.querySelectorAll('input')) {
+      const key = input.dataset.cal;
+      if (values[key] != null) input.value = values[key];
+      input.addEventListener('input', update);
+    }
+    row.querySelector('.removeCal').addEventListener('click', () => { row.remove(); update(); });
+    calRows.appendChild(row);
+  }
+  $('addCal').addEventListener('click', () => { addCalRow(); update(); });
+  addCalRow({ Hour: 9, Minute: 0 }); // 初期値: 毎朝9時
+
+  /* ---- フォーム → config ---- */
+  function numOrNull(v) {
+    if (v === '' || v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  function lines(v) {
+    return v.split('\n').map((s) => s.trim()).filter((s) => s !== '');
+  }
+  function readConfig() {
+    const env = {};
+    for (const line of lines($('env').value)) {
+      const eq = line.indexOf('=');
+      if (eq > 0) env[line.slice(0, eq).trim()] = line.slice(eq + 1);
+    }
+    const calendarIntervals = [...calRows.querySelectorAll('.cal-row')].map((row) => {
+      const c = {};
+      for (const input of row.querySelectorAll('input')) c[input.dataset.cal] = numOrNull(input.value);
+      return c;
+    });
+    return {
+      label: $('label').value,
+      programArguments: lines($('args').value),
+      workingDirectory: $('wd').value.trim(),
+      environmentVariables: env,
+      standardOutPath: $('stdout').value.trim(),
+      standardErrorPath: $('stderr').value.trim(),
+      runAtLoad: $('runAtLoad').checked,
+      startInterval: numOrNull($('interval').value),
+      calendarIntervals,
+      watchPaths: lines($('watch').value),
+      queueDirectories: lines($('queue').value),
+      keepAlive: $('keepAlive').value,
+      processType: $('processType').value,
+      throttleInterval: numOrNull($('throttle').value),
+    };
+  }
+
+  /* ---- 出力更新 ---- */
+  let current = null;
+  function update() {
+    current = generatePlist(readConfig());
+
+    const ul = $('issues');
+    ul.innerHTML = '';
+    if (current.issues.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'issue-ok';
+      li.textContent = '✓ 問題は見つかりませんでした。';
+      ul.appendChild(li);
+    }
+    const badge = { error: '✕ エラー', warn: '⚠ 警告', info: 'ℹ 参考' };
+    for (const issue of current.issues) {
+      const li = document.createElement('li');
+      li.className = 'issue-' + issue.level;
+      li.textContent = `${badge[issue.level]}: ${issue.message}`;
+      ul.appendChild(li);
+    }
+
+    $('xmlOut').textContent = current.xml;
+    $('cmdOut').textContent = current.commands;
+    $('savePath').textContent = '~/Library/LaunchAgents/' + current.filename;
+  }
+
+  /* ---- ボタン類 ---- */
+  async function copyText(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+      flash(btn, 'コピーしました');
+    } catch {
+      // file:// などで Clipboard API が使えない場合のフォールバック
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      flash(btn, 'コピーしました');
+    }
+  }
+  function flash(btn, msg) {
+    const orig = btn.textContent;
+    btn.textContent = msg;
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  }
+  $('copyXml').addEventListener('click', (e) => copyText(current.xml, e.target));
+  $('copyCmd').addEventListener('click', (e) => copyText(current.commands, e.target));
+  $('download').addEventListener('click', () => {
+    const blob = new Blob([current.xml], { type: 'application/xml' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = current.filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+  $('suggestLogs').addEventListener('click', () => {
+    const label = $('label').value.trim() || 'myjob';
+    $('stdout').value = `/Users/USERNAME/Library/Logs/${label}.log`;
+    $('stderr').value = `/Users/USERNAME/Library/Logs/${label}.err.log`;
+    update();
+  });
+  $('insertPath').addEventListener('click', () => {
+    const cur = $('env').value.trim();
+    const tpl = 'PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+    $('env').value = cur ? cur + '\n' + tpl : tpl;
+    update();
+  });
+
+  /* ---- 全入力で即時更新 ---- */
+  for (const el of document.querySelectorAll('#form input, #form textarea, #form select')) {
+    el.addEventListener('input', update);
+    el.addEventListener('change', update);
+  }
+  update();
+</script>
+</body>
+</html>
