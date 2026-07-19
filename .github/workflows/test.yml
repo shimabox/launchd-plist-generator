@@ -9,7 +9,8 @@ jobs:
   test:
     strategy:
       matrix:
-        # macos は plutil -lint を含む全テスト、ubuntu は plutil なしでも動くことの確認
+        # macos は plutil -lint / bin/launchd-plist の darwin 限定テストを含む全テスト、
+        # ubuntu は plutil/launchctl なしでも動くこと (環境非依存ロジック) の確認
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -18,3 +19,5 @@ jobs:
         with:
           node-version: lts/*
       - run: node test/generator.test.js
+      - run: node test/cli-lib.test.js
+      - run: node test/cli-darwin.test.js

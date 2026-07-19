@@ -1,6 +1,21 @@
 # CLI 計画 (check / doctor)
 
-launchd plist のトラブルシューティングに特化した CLI の計画。まだ計画段階であり、実装はしていない。
+launchd plist のトラブルシューティングに特化した CLI の計画。段階 1・2 (`bin/launchd-plist` の
+`check`/`doctor` サブコマンド、guide.md への誘導リンク) は実装済み。段階 3 (配布整備) は未着手。
+
+## 使い方 (実装済み)
+
+```sh
+node bin/launchd-plist check <file.plist>   # 静的検証のみ
+node bin/launchd-plist doctor <file.plist>  # check + 実行環境・登録状態の診断 (読み取り専用)
+
+# オプション
+node bin/launchd-plist check <file.plist> --json    # issue を JSON 配列で出力
+node bin/launchd-plist check <file.plist> --strict  # 警告のみでも exit code を 1 にする
+node bin/launchd-plist --help
+```
+
+macOS 限定 (`plutil`/`launchctl` を利用)。macOS 以外で実行するとその旨のエラーを出して終了する。
 
 ## 背景と立ち位置
 
