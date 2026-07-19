@@ -32,6 +32,9 @@ open index.html
 
 `bin/launchd-plist` は、すでにある `.plist` ファイルを診断するための依存ゼロの Node CLI です
 (macOS 限定。`plutil`/`launchctl` を利用します)。生成機能は持たず、ブラウザ版と役割を分けています。
+実行には Node.js が必要です。[mise](https://mise.jdx.dev/) を使っている場合はリポジトリ直下で
+`mise install` すると `.mise.toml` で固定した Node バージョンが有効になります(必須ではなく、
+システムに Node があればそのまま動きます)。
 
 ```sh
 # 静的検証のみ (Label・パス・トリガーなどの書式チェック)
