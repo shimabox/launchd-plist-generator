@@ -21,7 +21,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { generatePlist, plistDictToConfig } = require('../generator.js');
+const { generatePlist, plistDictToConfig, LAUNCHD_DEFAULT_PATH } = require('../generator.js');
 
 /* ---------- guide.md へのリンク解決 (純粋関数) ---------- */
 
@@ -428,6 +428,32 @@ function checkProgramArgumentsTypes(dict) {
   return issues;
 }
 
+// plist の生の dict から、config (plistDictToConfig の変換結果) には現れない起動契機の
+// キーを検出する。config は Sockets/MachServices/StartOnMount/LaunchEvents や、
+// SuccessfulExit 以外の条件を使う KeepAlive を表現できないため、これらしか使わない
+// plist は generatePlist().issues の hasTrigger 判定で「トリガーがない」と誤診断される。
+const EXTRA_TRIGGER_KEYS = ['Sockets', 'MachServices', 'StartOnMount', 'LaunchEvents'];
+
+function hasNonEmptyValue(v) {
+  if (v === undefined || v === null) return false;
+  if (typeof v === 'boolean') return v === true;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === 'object') return Object.keys(v).length > 0;
+  return Boolean(v);
+}
+
+function detectRawTriggerKeys(dict) {
+  const found = EXTRA_TRIGGER_KEYS.filter((k) => hasNonEmptyValue(dict[k]));
+  // KeepAlive が dict で、かつ SuccessfulExit: false 単独の形 (plistDictToConfig が
+  // config.keepAlive = 'on-failure' として認識できる唯一の形) でない場合、
+  // NetworkState/PathState/OtherJobEnabled などの条件付き KeepAlive は
+  // config に反映されず (「対応外」の note にはなるが) トリガーとして算入されない。
+  if (dict.KeepAlive && typeof dict.KeepAlive === 'object' && !Array.isArray(dict.KeepAlive) && dict.KeepAlive.SuccessfulExit !== false) {
+    found.push('KeepAlive');
+  }
+  return found;
+}
+
 function runCheck(filePath) {
   const dict = readPlistAsDict(filePath);
   if (typeof dict !== 'object' || dict === null || Array.isArray(dict)) {
@@ -436,11 +462,16 @@ function runCheck(filePath) {
 
   const cliNotes = [];
   // Program (実行ファイル) と ProgramArguments (argv) を両方持つ構成は、argv[0] が実行
-  // ファイルと異なり得るため plistDictToConfig では読み込み不能としてエラーになる。CLI の
-  // 診断はフォームへの再現性を問わないので、Program 側は情報として案内するに留め、
+  // ファイルと異なり得るため plistDictToConfig では読み込み不能としてエラーになる
+  // (ProgramArguments が空配列の場合は plistDictToConfig 自身が Program を単独の argv として
+  // 正しく扱えるため、ここでは何もしない — 空配列を理由に削除すると「実行するコマンドが
+  // 未指定」という誤ったエラーになる)。CLI の診断はフォームへの再現性を問わないので、
+  // ProgramArguments が実際に 1 つ以上ある場合だけ、Program 側は情報として案内するに留め、
   // ProgramArguments 側のみを渡して他の項目の検証を継続する。
   const dictForForm = { ...dict };
-  if (typeof dict.Program === 'string' && Array.isArray(dict.ProgramArguments)) {
+  const hasNonEmptyProgramArguments = Array.isArray(dict.ProgramArguments) && dict.ProgramArguments.length > 0;
+  const hasProgramArgsCombo = typeof dict.Program === 'string' && hasNonEmptyProgramArguments;
+  if (hasProgramArgsCombo) {
     cliNotes.push(
       `Program (${dict.Program}) と ProgramArguments が両方指定されています。このツールは実行ファイル ` +
         '(Program) が argv[0] と異なる構成までは検証できないため、ProgramArguments の内容のみを検証します。'
@@ -454,23 +485,43 @@ function runCheck(filePath) {
   const { issues: formIssues } = generatePlist(config);
   let issues = [...typeIssues, ...formIssues];
 
-  // Sockets (ソケット起動) は plistDictToConfig / generatePlist が認識しないトリガー種別で、
-  // 未対応キーとして notes には残るが、そのままだと「トリガーがない」警告と矛盾する。
-  // Sockets が存在する場合はその警告を info に差し替える。
-  if (dict.Sockets && typeof dict.Sockets === 'object') {
+  // 実際の実行ファイルは Program があればそちら (argv[0] とは異なりうる)、なければ
+  // ProgramArguments[0] (Program 単独指定時は plistDictToConfig が programArguments[0] に
+  // 折り込み済み)。doctor の実行ファイル存在確認にはこちらを使う。
+  const execPath = (typeof dict.Program === 'string' && dict.Program) || (config.programArguments && config.programArguments[0]) || '';
+
+  if (hasProgramArgsCombo) {
+    // ProgramArguments[0] を実行ファイルとみなした絶対パス推奨警告は、Program がある構成
+    // では的外れ (真の実行ファイルは Program) なので取り除き、Program 自体で評価し直す。
+    issues = issues.filter(
+      (i) => !(i.field === 'programArguments' && i.level === 'warn' && i.message.includes('は絶対パスで書くことを強く推奨します'))
+    );
+    if (!isAbsolutePathLike(dict.Program)) {
+      issues.push({
+        level: 'warn',
+        message:
+          `実行ファイル (Program)「${dict.Program}」は絶対パスで書くことを強く推奨します。` +
+          `launchd の PATH は ${LAUNCHD_DEFAULT_PATH} だけなので、それ以外の場所のコマンドは見つかりません (exit 127 の典型原因)。`,
+        field: 'programArguments',
+      });
+    }
+  }
+
+  const extraTriggers = detectRawTriggerKeys(dict);
+  if (extraTriggers.length > 0) {
+    const keysText = extraTriggers.join(', ');
     issues = issues.map((issue) =>
       issue.field === 'trigger' && issue.level === 'warn'
         ? {
             level: 'info',
-            message:
-              'Sockets (ソケット起動) が設定されているため、起動トリガーはあります。このツールは Sockets の内容までは検証していません。',
+            message: `${keysText} が設定されているため、起動トリガーはあります。このツールは ${keysText} の内容までは検証していません。`,
             field: 'trigger',
           }
         : issue
     );
   }
 
-  return { config, issues, notes: [...cliNotes, ...notes] };
+  return { config, issues, notes: [...cliNotes, ...notes], execPath };
 }
 
 function runDoctor(filePath) {
@@ -494,8 +545,9 @@ function runDoctor(filePath) {
   const issues = [...base.issues];
   const notes = [...base.notes];
 
-  // 実行ファイル (argv[0])
-  const argv0 = (config.programArguments || [])[0] || '';
+  // 実行ファイル。Program がある構成では argv[0] (ProgramArguments[0]) ではなく
+  // Program 自体が実際に実行されるファイルなので、runCheck が解決した execPath を使う。
+  const argv0 = base.execPath || '';
   const argv0Info = isAbsolutePathLike(argv0) ? getFileInfo(argv0) : null;
   const execIssue = diagnoseExecutable(argv0, argv0Info);
   if (execIssue) issues.push(execIssue);
@@ -668,6 +720,7 @@ if (typeof module !== 'undefined' && module.exports) {
     shellQuote,
     // check の判定ロジック (純粋関数)
     checkProgramArgumentsTypes,
+    detectRawTriggerKeys,
     // doctor の判定ロジック (純粋関数)
     diagnoseExecutable,
     diagnoseDirectory,

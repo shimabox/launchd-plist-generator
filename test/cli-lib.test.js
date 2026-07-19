@@ -18,6 +18,7 @@ const {
   formatJson,
   shellQuote,
   checkProgramArgumentsTypes,
+  detectRawTriggerKeys,
   diagnoseExecutable,
   diagnoseDirectory,
   diagnosePlistLocation,
@@ -482,6 +483,36 @@ test('checkProgramArgumentsTypes: すべて文字列なら空配列', () => {
 
 test('checkProgramArgumentsTypes: ProgramArguments がなければ空配列', () => {
   assert.deepStrictEqual(checkProgramArgumentsTypes({}), []);
+});
+
+/* ---------- detectRawTriggerKeys ---------- */
+
+test('detectRawTriggerKeys: Sockets/MachServices/StartOnMount/LaunchEvents をそれぞれ検出する', () => {
+  assert.deepStrictEqual(detectRawTriggerKeys({ Sockets: { Listener: {} } }), ['Sockets']);
+  assert.deepStrictEqual(detectRawTriggerKeys({ MachServices: { 'com.example.svc': true } }), ['MachServices']);
+  assert.deepStrictEqual(detectRawTriggerKeys({ StartOnMount: true }), ['StartOnMount']);
+  assert.deepStrictEqual(detectRawTriggerKeys({ LaunchEvents: { 'com.apple.notifyd.matching': {} } }), ['LaunchEvents']);
+});
+
+test('detectRawTriggerKeys: 空の dict/false/未指定は検出しない', () => {
+  assert.deepStrictEqual(detectRawTriggerKeys({ Sockets: {}, StartOnMount: false }), []);
+  assert.deepStrictEqual(detectRawTriggerKeys({}), []);
+});
+
+test('detectRawTriggerKeys: SuccessfulExit:false 単独の KeepAlive は (config 側で表現できるため) 検出しない', () => {
+  assert.deepStrictEqual(detectRawTriggerKeys({ KeepAlive: { SuccessfulExit: false } }), []);
+});
+
+test('detectRawTriggerKeys: SuccessfulExit 以外の条件を使う KeepAlive は検出する', () => {
+  assert.deepStrictEqual(detectRawTriggerKeys({ KeepAlive: { NetworkState: true } }), ['KeepAlive']);
+  assert.deepStrictEqual(detectRawTriggerKeys({ KeepAlive: { SuccessfulExit: false, NetworkState: true } }), []);
+});
+
+test('detectRawTriggerKeys: 複数キーが同時にあればすべて列挙する', () => {
+  assert.deepStrictEqual(
+    detectRawTriggerKeys({ Sockets: { a: {} }, MachServices: { b: true } }),
+    ['Sockets', 'MachServices']
+  );
 });
 
 if (failed > 0) {

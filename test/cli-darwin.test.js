@@ -327,8 +327,11 @@ test('余分な位置引数は usage エラーになる', () => {
   }
 });
 
-test('check: Program と ProgramArguments の併用はクラッシュせず情報として案内される', () => {
+test('check: Program と ProgramArguments (argv[0] が相対) の併用はクラッシュせず、絶対パス警告も出ない', () => {
   if (process.platform !== 'darwin') return;
+  // com.apple.SafeEjectGPUAgent.plist を模した構成 (Program は絶対パス、
+  // ProgramArguments[0] は Program と異なる相対名)。ProgramArguments[0] を実行ファイルと
+  // 誤認すると「絶対パスで書くことを推奨」という的外れな警告が出てしまう。
   const plist = writeTmpPlist(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -345,6 +348,58 @@ test('check: Program と ProgramArguments の併用はクラッシュせず情�
     // 生の「読み込めませんでした」例外ではなく、通常どおり ✓/⚠ 系の結果が出ること
     assert.ok(!r.stderr.includes('エラー:'), r.stderr);
     assert.ok(r.stdout.includes('Program'), r.stdout);
+    // ProgramArguments[0] ("echo", 相対) を実行ファイルとみなした誤った警告が出ないこと。
+    // このケースにはトリガーが無いため「起動トリガーがない」警告自体は正しく残る。
+    assert.ok(!r.stdout.includes('は絶対パスで書くことを強く推奨します'), r.stdout);
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
+test('check: Program のみ (ProgramArguments が空配列) は「実行コマンド未指定」エラーにならない', () => {
+  if (process.platform !== 'darwin') return;
+  // com.apple.IOUIAgent.plist を模した構成。
+  const plist = writeTmpPlist(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.programonly</string>
+  <key>Program</key><string>/bin/echo</string>
+  <key>ProgramArguments</key>
+  <array/>
+</dict>
+</plist>
+`);
+  try {
+    const r = runCli(['check', plist]);
+    assert.strictEqual(r.status, 0, r.stdout);
+    assert.ok(!r.stdout.includes('実行するコマンド'), r.stdout);
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
+test('doctor: Program がある構成では argv[0] ではなく Program の存在を確認する', () => {
+  if (process.platform !== 'darwin') return;
+  // Program は存在しない絶対パス、ProgramArguments[0] は存在する相対コマンド名。
+  // argv[0] だけを見ていると「絶対パスでないため存在確認をスキップ」して
+  // 本来検出すべき「実行ファイルが見つからない」エラーを見逃してしまう。
+  const plist = writeTmpPlist(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.missingprogram</string>
+  <key>Program</key><string>/no/such/executable-${process.pid}</string>
+  <key>ProgramArguments</key>
+  <array><string>relative-name</string></array>
+</dict>
+</plist>
+`);
+  try {
+    const r = runCli(['doctor', plist]);
+    assert.strictEqual(r.status, 1, r.stdout);
+    assert.ok(r.stdout.includes('見つかりません'), r.stdout);
+    assert.ok(r.stdout.includes(`/no/such/executable-${process.pid}`), r.stdout);
   } finally {
     fs.unlinkSync(plist);
   }
@@ -394,6 +449,65 @@ test('check: Sockets 起動のみの plist は「トリガーがない」と誤�
     const r = runCli(['check', plist, '--strict']);
     assert.ok(!r.stdout.includes('起動トリガーがひとつもありません'), r.stdout);
     assert.ok(r.stdout.includes('Sockets'), r.stdout);
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
+test('check: LaunchEvents 起動のみの plist も「トリガーがない」と誤警告しない', () => {
+  if (process.platform !== 'darwin') return;
+  // com.apple.IOUIAgent.plist / com.apple.SafeEjectGPUAgent.plist を模した構成。
+  const plist = writeTmpPlist(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.eventjob</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/echo</string></array>
+  <key>LaunchEvents</key>
+  <dict>
+    <key>com.apple.notifyd.matching</key>
+    <dict>
+      <key>SomeEvent</key>
+      <dict>
+        <key>Notification</key><string>com.example.something</string>
+      </dict>
+    </dict>
+  </dict>
+</dict>
+</plist>
+`);
+  try {
+    const r = runCli(['check', plist, '--strict']);
+    assert.ok(!r.stdout.includes('起動トリガーがひとつもありません'), r.stdout);
+    assert.ok(r.stdout.includes('LaunchEvents'), r.stdout);
+    assert.strictEqual(r.status, 0, r.stdout);
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
+test('check: SuccessfulExit 以外の条件を使う KeepAlive のみの plist も「トリガーがない」と誤警告しない', () => {
+  if (process.platform !== 'darwin') return;
+  const plist = writeTmpPlist(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.networkjob</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/echo</string></array>
+  <key>KeepAlive</key>
+  <dict>
+    <key>NetworkState</key><true/>
+  </dict>
+</dict>
+</plist>
+`);
+  try {
+    const r = runCli(['check', plist, '--strict']);
+    assert.ok(!r.stdout.includes('起動トリガーがひとつもありません'), r.stdout);
+    assert.ok(r.stdout.includes('KeepAlive'), r.stdout);
+    assert.strictEqual(r.status, 0, r.stdout);
   } finally {
     fs.unlinkSync(plist);
   }
