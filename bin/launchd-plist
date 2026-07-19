@@ -151,6 +151,13 @@ function isAbsolutePathLike(p) {
   return typeof p === 'string' && p.startsWith('/');
 }
 
+// 表示用のシェルコマンドに安全に埋め込むための POSIX シングルクォートエスケープ。
+// 空白や $()/`` などのシェル特殊文字を含むパス・Label でも、表示されたコマンドを
+// そのままコピー&ペーストして安全に実行できるようにする (このツール自体は実行しない)。
+function shellQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 // argv[0] (実行ファイル) の存在・実行権限を判定する。
 // fileInfo は getFileInfo() の戻り値 (I/O 層)。argv0 が空/相対パスなら判定をスキップする。
 function diagnoseExecutable(argv0, fileInfo) {
@@ -279,7 +286,7 @@ function diagnoseRegistration({ label, uid, plistPath, plistRealPath, printResul
       message:
         `${label} は LaunchDaemon 用ディレクトリに配置されているため、登録状態の確認をスキップしました。` +
         'このツールの登録状態チェックは per-user の LaunchAgent (gui ドメイン) のみに対応しています。' +
-        `LaunchDaemon の登録状態は \`launchctl print system/${label}\` などで別途確認してください。`,
+        `LaunchDaemon の登録状態は \`launchctl print ${shellQuote('system/' + label)}\` などで別途確認してください。`,
       field: 'registrationState',
     });
     return { issues, notes };
@@ -332,8 +339,8 @@ function diagnoseRegistration({ label, uid, plistPath, plistRealPath, printResul
 
   notes.push(
     `${label} は登録済みです。plist の変更を反映するには一度登録を解除してから再登録してください (このコマンドは実行されません):\n` +
-      `    launchctl bootout gui/${uid}/${label}\n` +
-      `    launchctl bootstrap gui/${uid} ${plistPath}`
+      `    launchctl bootout ${shellQuote(`gui/${uid}/${label}`)}\n` +
+      `    launchctl bootstrap gui/${uid} ${shellQuote(plistPath)}`
   );
 
   return { issues, notes };
@@ -403,14 +410,67 @@ function getLaunchctlPrint(label, uid) {
 
 /* ---------- check / doctor の組み立て ---------- */
 
+// ProgramArguments はすべて文字列である必要がある (launchd の仕様)。plistDictToConfig は
+// フォーム表示のため String() で強制変換してしまい型の誤りを見逃すため、変換前の生の値を
+// CLI 側で個別に検査する。
+function checkProgramArgumentsTypes(dict) {
+  if (!Array.isArray(dict.ProgramArguments)) return [];
+  const issues = [];
+  dict.ProgramArguments.forEach((v, i) => {
+    if (typeof v !== 'string') {
+      issues.push({
+        level: 'error',
+        message: `ProgramArguments の ${i} 番目の要素が文字列ではありません (${JSON.stringify(v)})。launchd の ProgramArguments はすべて文字列で指定してください。`,
+        field: 'programArguments',
+      });
+    }
+  });
+  return issues;
+}
+
 function runCheck(filePath) {
   const dict = readPlistAsDict(filePath);
   if (typeof dict !== 'object' || dict === null || Array.isArray(dict)) {
     throw new Error('plist のルートは dict である必要があります。');
   }
-  const { config, notes } = plistDictToConfig(dict);
-  const { issues } = generatePlist(config);
-  return { config, issues, notes };
+
+  const cliNotes = [];
+  // Program (実行ファイル) と ProgramArguments (argv) を両方持つ構成は、argv[0] が実行
+  // ファイルと異なり得るため plistDictToConfig では読み込み不能としてエラーになる。CLI の
+  // 診断はフォームへの再現性を問わないので、Program 側は情報として案内するに留め、
+  // ProgramArguments 側のみを渡して他の項目の検証を継続する。
+  const dictForForm = { ...dict };
+  if (typeof dict.Program === 'string' && Array.isArray(dict.ProgramArguments)) {
+    cliNotes.push(
+      `Program (${dict.Program}) と ProgramArguments が両方指定されています。このツールは実行ファイル ` +
+        '(Program) が argv[0] と異なる構成までは検証できないため、ProgramArguments の内容のみを検証します。'
+    );
+    delete dictForForm.Program;
+  }
+
+  const typeIssues = checkProgramArgumentsTypes(dict);
+
+  const { config, notes } = plistDictToConfig(dictForForm);
+  const { issues: formIssues } = generatePlist(config);
+  let issues = [...typeIssues, ...formIssues];
+
+  // Sockets (ソケット起動) は plistDictToConfig / generatePlist が認識しないトリガー種別で、
+  // 未対応キーとして notes には残るが、そのままだと「トリガーがない」警告と矛盾する。
+  // Sockets が存在する場合はその警告を info に差し替える。
+  if (dict.Sockets && typeof dict.Sockets === 'object') {
+    issues = issues.map((issue) =>
+      issue.field === 'trigger' && issue.level === 'warn'
+        ? {
+            level: 'info',
+            message:
+              'Sockets (ソケット起動) が設定されているため、起動トリガーはあります。このツールは Sockets の内容までは検証していません。',
+            field: 'trigger',
+          }
+        : issue
+    );
+  }
+
+  return { config, issues, notes: [...cliNotes, ...notes] };
 }
 
 function runDoctor(filePath) {
@@ -487,7 +547,7 @@ function runDoctor(filePath) {
 /* ---------- argv 処理 ---------- */
 
 function parseArgv(argv) {
-  const result = { command: null, file: null, json: false, strict: false, help: false, unknown: [] };
+  const result = { command: null, file: null, json: false, strict: false, help: false, unknown: [], extra: [] };
   const rest = [];
   for (const a of argv || []) {
     if (a === '--help' || a === '-h') result.help = true;
@@ -498,7 +558,9 @@ function parseArgv(argv) {
   if (rest.length === 0) return result;
   const [command, ...others] = rest;
   result.command = command;
-  result.file = others.find((o) => !o.startsWith('-')) || null;
+  const positionals = others.filter((o) => !o.startsWith('-'));
+  result.file = positionals[0] || null;
+  result.extra = positionals.slice(1);
   result.unknown = others.filter((o) => o.startsWith('-'));
   return result;
 }
@@ -544,6 +606,13 @@ function main(argv) {
     return;
   }
 
+  if (opts.unknown.length > 0 || opts.extra.length > 0) {
+    console.error(`不明なオプションまたは余分な引数です: ${[...opts.unknown, ...opts.extra].join(' ')}\n`);
+    console.error(usageText());
+    process.exit(1);
+    return;
+  }
+
   if (!opts.file) {
     console.error('plist ファイルを指定してください。\n');
     console.error(usageText());
@@ -560,19 +629,22 @@ function main(argv) {
     return;
   }
 
-  let result;
+  let entries;
+  let fatalError = null;
   try {
-    result = opts.command === 'check' ? runCheck(opts.file) : runDoctor(opts.file);
+    const result = opts.command === 'check' ? runCheck(opts.file) : runDoctor(opts.file);
+    entries = buildEntries(result.issues, result.notes);
   } catch (e) {
-    console.error(`エラー: ${e.message}`);
-    process.exit(1);
-    return;
+    fatalError = e;
+    entries = [{ level: 'error', message: e.message, field: null }];
   }
 
-  const entries = buildEntries(result.issues, result.notes);
-
   if (opts.json) {
+    // --json 利用側が結果を解析できるよう、致命的エラー時も (人間向けメッセージを stderr に
+    // 出す代わりに) 同じ JSON 配列形式で stdout に出力する。
     console.log(formatJson(entries));
+  } else if (fatalError) {
+    console.error(`エラー: ${fatalError.message}`);
   } else {
     console.log(formatHuman(entries, { guidePath: 'docs/guide.md' }));
   }
@@ -593,6 +665,9 @@ if (typeof module !== 'undefined' && module.exports) {
     computeExitCode,
     formatHuman,
     formatJson,
+    shellQuote,
+    // check の判定ロジック (純粋関数)
+    checkProgramArgumentsTypes,
     // doctor の判定ロジック (純粋関数)
     diagnoseExecutable,
     diagnoseDirectory,

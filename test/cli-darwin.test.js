@@ -294,6 +294,111 @@ test('存在しないファイルはエラーメッセージ付きで exit 1 に
   assert.ok(r.stderr.includes('エラー'));
 });
 
+test('check --json: 存在しないファイルでも stdout は解析可能な JSON 配列になる', () => {
+  if (process.platform !== 'darwin') return;
+  const r = runCli(['check', '/tmp/definitely-does-not-exist-' + process.pid + '.plist', '--json']);
+  assert.strictEqual(r.status, 1);
+  const parsed = JSON.parse(r.stdout);
+  assert.ok(Array.isArray(parsed));
+  assert.ok(parsed.some((i) => i.level === 'error'));
+});
+
+test('不明なオプション (タイプミス) は usage エラーになり黙って無視されない', () => {
+  if (process.platform !== 'darwin') return;
+  const plist = writeTmpPlist(WARN_ONLY_PLIST);
+  try {
+    const r = runCli(['check', plist, '--strcit']);
+    assert.strictEqual(r.status, 1);
+    assert.ok(r.stderr.includes('不明なオプション'));
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
+test('余分な位置引数は usage エラーになる', () => {
+  if (process.platform !== 'darwin') return;
+  const plist = writeTmpPlist(WARN_ONLY_PLIST);
+  try {
+    const r = runCli(['check', plist, 'extra-arg']);
+    assert.strictEqual(r.status, 1);
+    assert.ok(r.stderr.includes('余分な引数'));
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
+test('check: Program と ProgramArguments の併用はクラッシュせず情報として案内される', () => {
+  if (process.platform !== 'darwin') return;
+  const plist = writeTmpPlist(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.programandargs</string>
+  <key>Program</key><string>/bin/echo</string>
+  <key>ProgramArguments</key>
+  <array><string>echo</string><string>hi</string></array>
+</dict>
+</plist>
+`);
+  try {
+    const r = runCli(['check', plist]);
+    // 生の「読み込めませんでした」例外ではなく、通常どおり ✓/⚠ 系の結果が出ること
+    assert.ok(!r.stderr.includes('エラー:'), r.stderr);
+    assert.ok(r.stdout.includes('Program'), r.stdout);
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
+test('check: ProgramArguments に文字列以外の要素があれば error になる', () => {
+  if (process.platform !== 'darwin') return;
+  const plist = writeTmpPlist(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.badargtype</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/echo</string><integer>1</integer></array>
+</dict>
+</plist>
+`);
+  try {
+    const r = runCli(['check', plist]);
+    assert.strictEqual(r.status, 1);
+    assert.ok(r.stdout.includes('文字列ではありません'), r.stdout);
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
+test('check: Sockets 起動のみの plist は「トリガーがない」と誤警告しない', () => {
+  if (process.platform !== 'darwin') return;
+  const plist = writeTmpPlist(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.socketjob</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/echo</string></array>
+  <key>Sockets</key>
+  <dict>
+    <key>Listener</key>
+    <dict>
+      <key>SockServiceName</key><string>http</string>
+    </dict>
+  </dict>
+</dict>
+</plist>
+`);
+  try {
+    const r = runCli(['check', plist, '--strict']);
+    assert.ok(!r.stdout.includes('起動トリガーがひとつもありません'), r.stdout);
+    assert.ok(r.stdout.includes('Sockets'), r.stdout);
+  } finally {
+    fs.unlinkSync(plist);
+  }
+});
+
 if (failed > 0) {
   console.error(`\n${failed} 件失敗`);
   process.exit(1);

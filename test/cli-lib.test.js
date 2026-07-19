@@ -16,6 +16,8 @@ const {
   computeExitCode,
   formatHuman,
   formatJson,
+  shellQuote,
+  checkProgramArgumentsTypes,
   diagnoseExecutable,
   diagnoseDirectory,
   diagnosePlistLocation,
@@ -63,6 +65,20 @@ test('parseArgv: --help はどこにあっても検出される', () => {
 
 test('parseArgv: -h も --help と同じ扱い', () => {
   assert.strictEqual(parseArgv(['-h']).help, true);
+});
+
+test('parseArgv: 不明なオプション (タイプミス等) は unknown に入る', () => {
+  const r = parseArgv(['check', 'a.plist', '--strcit']);
+  assert.strictEqual(r.file, 'a.plist');
+  assert.deepStrictEqual(r.unknown, ['--strcit']);
+  assert.deepStrictEqual(r.extra, []);
+});
+
+test('parseArgv: 余分な位置引数は extra に入る', () => {
+  const r = parseArgv(['check', 'a.plist', 'b.plist']);
+  assert.strictEqual(r.file, 'a.plist');
+  assert.deepStrictEqual(r.extra, ['b.plist']);
+  assert.deepStrictEqual(r.unknown, []);
 });
 
 test('usageText: サブコマンドとオプションの説明を含む', () => {
@@ -357,7 +373,7 @@ test('diagnoseRegistration: isLaunchDaemon=true は printResult に関わらず�
   assert.strictEqual(r.issues[0].level, 'info');
   assert.ok(!r.issues[0].message.includes('未登録'));
   assert.ok(r.issues[0].message.includes('per-user の LaunchAgent (gui ドメイン) のみに対応しています'));
-  assert.ok(r.issues[0].message.includes('launchctl print system/com.example.daemon'));
+  assert.ok(r.issues[0].message.includes("launchctl print 'system/com.example.daemon'"));
   assert.strictEqual(r.notes.length, 0);
 });
 
@@ -387,8 +403,8 @@ test('diagnoseRegistration: 登録済み・パス一致・exit code 0 は ok の
   assert.ok(r.issues.some((i) => i.level === 'ok' && i.message.includes('登録済み')));
   assert.ok(!r.issues.some((i) => i.level === 'warn'));
   assert.strictEqual(r.notes.length, 1);
-  assert.ok(r.notes[0].includes('launchctl bootout gui/501/com.example.job'));
-  assert.ok(r.notes[0].includes('launchctl bootstrap gui/501 /a/real.plist'));
+  assert.ok(r.notes[0].includes("launchctl bootout 'gui/501/com.example.job'"));
+  assert.ok(r.notes[0].includes("launchctl bootstrap gui/501 '/a/real.plist'"));
 });
 
 test('diagnoseRegistration: パス不一致は warn (registrationPath)', () => {
@@ -432,6 +448,40 @@ test('diagnoseRegistration: 出力のパースに失敗しても静かに degrad
   });
   assert.strictEqual(r.issues.length, 1);
   assert.strictEqual(r.issues[0].level, 'info');
+});
+
+/* ---------- shellQuote ---------- */
+
+test('shellQuote: 空白を含む値は1つの引数としてクォートされる', () => {
+  assert.strictEqual(shellQuote('/a b/c.plist'), "'/a b/c.plist'");
+});
+
+test('shellQuote: シングルクォートを含む値は安全にエスケープされる', () => {
+  const quoted = shellQuote(`it's here`);
+  assert.strictEqual(quoted, `'it'\\''s here'`);
+});
+
+test('shellQuote: コマンド置換記号を含む値も文字列としてそのまま扱われる', () => {
+  const quoted = shellQuote('$(rm -rf /)');
+  assert.strictEqual(quoted, "'$(rm -rf /)'");
+});
+
+/* ---------- checkProgramArgumentsTypes ---------- */
+
+test('checkProgramArgumentsTypes: 文字列以外の要素があれば error', () => {
+  const issues = checkProgramArgumentsTypes({ ProgramArguments: ['/bin/echo', 42, true] });
+  assert.strictEqual(issues.length, 2);
+  assert.ok(issues.every((i) => i.level === 'error' && i.field === 'programArguments'));
+  assert.ok(issues[0].message.includes('1 番目'));
+  assert.ok(issues[1].message.includes('2 番目'));
+});
+
+test('checkProgramArgumentsTypes: すべて文字列なら空配列', () => {
+  assert.deepStrictEqual(checkProgramArgumentsTypes({ ProgramArguments: ['/bin/echo', 'hi'] }), []);
+});
+
+test('checkProgramArgumentsTypes: ProgramArguments がなければ空配列', () => {
+  assert.deepStrictEqual(checkProgramArgumentsTypes({}), []);
 });
 
 if (failed > 0) {
