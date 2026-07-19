@@ -28,6 +28,26 @@ open index.html
   このツールで表現できないキーや値は、上書き前の確認ダイアログで喪失警告を表示)
 - 入力内容はブラウザに自動保存され、次に開いたとき復元される(リセットボタン付き)
 
+## CLI (既存 plist の診断)
+
+`bin/launchd-plist` は、すでにある `.plist` ファイルを診断するための依存ゼロの Node CLI です
+(macOS 限定。`plutil`/`launchctl` を利用します)。生成機能は持たず、ブラウザ版と役割を分けています。
+
+```sh
+# 静的検証のみ (Label・パス・トリガーなどの書式チェック)
+node bin/launchd-plist check ~/Library/LaunchAgents/com.example.myjob.plist
+
+# check に加え、実行ファイル・ディレクトリの存在や launchd への登録状態も診断 (読み取り専用)
+node bin/launchd-plist doctor ~/Library/LaunchAgents/com.example.myjob.plist
+
+# CI 向け: 警告のみでも exit code を 1 にする / 結果を JSON で受け取る
+node bin/launchd-plist check some.plist --strict
+node bin/launchd-plist check some.plist --json
+```
+
+エラー・警告メッセージには [docs/guide.md](docs/guide.md) の該当節へのリンクが付きます。
+詳細な設計は [docs/cli-plan.md](docs/cli-plan.md) を参照してください。
+
 ## ドキュメント
 
 launchd の仕組みを知りたい人向けに、詳しさの段階別に [docs/](docs/) にまとめてあります。
